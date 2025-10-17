@@ -7,7 +7,18 @@ The repository holds the C++ implementation for Indexes used for experimentation
 
 
 ## Reproducing the experiments
-TODO
+### Create a set synthetic dataset
+Run the following commands to create a dataset to be used for your experiments.
+
+```
+cd Datasets
+python create_gmm_datasets.py <dataset_name> <data_size> <query_size>
+g++ -std=c++17 create_countbased_query.cpp -o create_countbased_query.out
+./create_countbased_query.out <dataset_name>
+```
+
+### Create a set synthetic dataset
+
 
 
 ## Authors and acknowledgment
