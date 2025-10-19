@@ -13,7 +13,7 @@ size_t RSTAR_BRANCH_FACTOR = 16;
 size_t CUR_BRANCH_FACTOR = 16;
 size_t RW_BRANCH_FACTOR = 16;
 
-std::string PROJECT_ROOT = "/scratch/project_2005865/sachithp/experiments-md-index/";
+std::string PROJECT_ROOT = "/scratch/project_2005865/sachithp/EvalPublicRepo/evaluating-learned-spatial-indexes/";
 
 class Constants
 {
