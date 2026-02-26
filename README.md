@@ -55,7 +55,7 @@ hq submit --each-line hq_tasks_evaluate
 
 ## Authors and acknowledgment
 The code is created and maintained by Sachith Pai (sachith.pai@helsinki.fi).
-The work was supported by the Academy of Finland.
+The work was supported by Michael Mathioudakis's Academy of Finland grants.
 
 
 ## Project status
