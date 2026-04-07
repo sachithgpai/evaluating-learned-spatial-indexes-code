@@ -1,11 +1,13 @@
 #ifndef FLOOD_TRAINER_H
 #define FLOOD_TRAINER_H
 
+#include<algorithm>
 #include<numeric>
 #include<fstream>
 #include<utility>
 #include<chrono>
 #include<limits>
+#include<random>
 #include"flood.h"
 
 
@@ -73,7 +75,8 @@ std::pair<std::array<int,Constants::DIM>, std::array<int,Constants::DIM>> FloodT
     }
     query_file.close();
 
-    std::random_shuffle(query_array.begin(),query_array.end());
+    std::mt19937 rng(std::random_device{}());
+    std::shuffle(query_array.begin(),query_array.end(),rng);
     auto end = std::chrono::system_clock::now();
     
     return FloodTrainerRandomSearch(point_array,query_array);

@@ -42,7 +42,19 @@ using json = nlohmann::json;   // using this to dump various logs.
 vector<size_t> BlockSizes{32, 64, 128, 256, 512, 1024, 2048, 4096};
 vector<string> selectivities_arr{"00064", "00256", "01024", "04096", "16384"};
 
+template <typename T>
+void shuffle_vector(vector<T>& values) {
+    static thread_local mt19937 rng(random_device{}());
+    shuffle(values.begin(), values.end(), rng);
+}
+
 int main(int argc, char* argv[]){
+
+    if(argc != 7 && argc != 8){
+        cerr<<"Usage: "<<argv[0]
+            <<" <dataset_name> <data_sample_num> <data_ent_id> <block_size> <query_ent_id> <selectivity_id> [result_file]"<<endl;
+        return 1;
+    }
 
     // std::mt19937_64 eng{std::random_device{}()};  // or seed however you want
     // std::uniform_int_distribution<> dist{0, 100};
@@ -54,8 +66,17 @@ int main(int argc, char* argv[]){
     int data_ent_id = atoi(argv[3]);
     BLOCK_SIZE = atoi(argv[4]);
     int query_ent_id = atoi(argv[5]);
-    string selectivity= selectivities_arr[atoi(argv[6])];
-    string line_num = string(argv[7]);
+    int selectivity_id = atoi(argv[6]);
+    if(selectivity_id < 0 || selectivity_id >= static_cast<int>(selectivities_arr.size())){
+        cerr<<"Invalid selectivity_id: "<<selectivity_id<<endl;
+        return 1;
+    }
+    string selectivity= selectivities_arr[selectivity_id];
+    string line_num =
+        (argc == 8)
+            ? string(argv[7])
+            : "P_"+to_string(BLOCK_SIZE)+"_D_"+to_string(data_sample_num)+"_DE_"+
+                to_string(data_ent_id)+"_Q_"+to_string(query_ent_id)+"_S_"+selectivity+".jsonl";
 
 
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" "<<PROJECT_ROOT<<"\n";
@@ -114,8 +135,8 @@ int main(int argc, char* argv[]){
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" WAZI Started"<<"\n";
 
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //############# WAZI #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -189,8 +210,8 @@ int main(int argc, char* argv[]){
 
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZIndexStarted"<<"\n";
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //############# ZIndex #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -262,8 +283,8 @@ int main(int argc, char* argv[]){
 
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZM-Index Started"<<"\n";
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //############# ZM-Index #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -356,8 +377,8 @@ int main(int argc, char* argv[]){
     
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" GRID Started"<<"\n";
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //############# GRID #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -434,8 +455,8 @@ int main(int argc, char* argv[]){
     
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" FLOOD Started"<<"\n";
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //############# FLOOD #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -512,8 +533,8 @@ int main(int argc, char* argv[]){
     
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" STR Started"<<"\n";
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   /* ##########################    STR   ######################################*/
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -588,8 +609,8 @@ int main(int argc, char* argv[]){
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSTAR Started"<<"\n";
 
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //########## RSTAR #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -664,8 +685,8 @@ int main(int argc, char* argv[]){
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" CUR Started"<<"\n";
 
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //########## CUR #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -742,8 +763,8 @@ int main(int argc, char* argv[]){
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RW Started"<<"\n";
 
     
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //########## RW #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -817,8 +838,8 @@ int main(int argc, char* argv[]){
     
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSMI Started"<<"\n";
    
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {    //########## RSMI-RTree-NoLocalModel #################
         // Training
         RTreeBASE rsmi_tree_obj(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/RSMI/"+query_agnostic_tree_name+".tree");
@@ -894,8 +915,8 @@ int main(int argc, char* argv[]){
     
     
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" KDTREE Started"<<"\n";
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {   //############# KDTREE #################
         // Training
         auto train_start = std::chrono::high_resolution_clock::now();
@@ -973,8 +994,8 @@ int main(int argc, char* argv[]){
 
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" QDTREE Started"<<"\n";
    
-    random_shuffle(datapoints.begin(),datapoints.end());
-    random_shuffle(countbased_queries.begin(),countbased_queries.end());
+    shuffle_vector(datapoints);
+    shuffle_vector(countbased_queries);
     {    //############# QDTREE RandomSearchVersion #################
 
         // Training
@@ -1053,6 +1074,7 @@ int main(int argc, char* argv[]){
 
 
 
+    filesystem::create_directories(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/ResultsFolder_ExtendBlockSize");
     ofstream result_file(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/ResultsFolder_ExtendBlockSize/"+line_num,ios_base::app);
     // ofstream result_file(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/Results.json",ios_base::app);
     for(auto& result_json: list_of_results)
