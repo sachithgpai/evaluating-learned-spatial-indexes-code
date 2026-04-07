@@ -7,6 +7,9 @@
 #include<vector>
 #include<tuple>
 
+/**
+ * Node used by the R-tree family.
+ */
 class RTreeNode{
     public:
         BoundingRectangle mbr_;
@@ -15,11 +18,13 @@ class RTreeNode{
         size_t local_block_id_;
         bool is_leaf_;
 
+        /** Create an empty leaf node. */
         RTreeNode(){
             is_leaf_=true;
             local_block_id_=0;
         }
 
+        /** Recursively delete the child subtrees. */
         ~RTreeNode(){
             for(auto child: children_)
                 delete child;
@@ -29,7 +34,9 @@ class RTreeNode{
 };
 
 
-// Needed for different R*tree implementations
+/**
+ * Temporary statistics bundle used while choosing an insertion/split target.
+ */
 class NodeStatsPointInsert{
     public:
         size_t child_pointer_id_;
@@ -46,11 +53,13 @@ class NodeStatsPointInsert{
         double_t cost_;
         double_t delta_cost_{};
 
+        /** Default-construct an empty statistics bundle. */
         NodeStatsPointInsert(){}
 
+        /** Build a statistics bundle from already computed scalar metrics. */
         NodeStatsPointInsert(size_t cid, double_t v, double_t dv, double_t p, double_t dp, double_t dov): child_pointer_id_(cid), volume_(v), delta_volume_(dv), perim_(p), delta_perim_(dp), delta_overlap_volume_(dov){}
 
-        /* Function used in RStarTree */
+        /** Construct the R*-tree insertion metrics for one child candidate. */
         NodeStatsPointInsert(size_t cid, BoundingRectangle& mbr, Point& insert_pnt): child_pointer_id_(cid),expanded_mbr_(mbr){
             volume_= mbr.Area();
             perim_ = mbr.Perimeter();
@@ -61,7 +70,7 @@ class NodeStatsPointInsert{
             
         }
 
-        /* Function used in RWTree*/
+        /** Construct the query-weighted insertion metrics for RWTree. */
         NodeStatsPointInsert(size_t cid, BoundingRectangle& mbr, Point& insert_pnt,WeightedDensEstTree * weighted_datapoint_density_estimator_): child_pointer_id_(cid),expanded_mbr_(mbr){
             volume_= mbr.Area();
             perim_ = mbr.Perimeter();

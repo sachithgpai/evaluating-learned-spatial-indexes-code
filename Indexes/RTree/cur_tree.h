@@ -19,12 +19,17 @@
 #include"../utils/density_estimators/weighted_dens_est.h"
 
 
+/**
+ * Query-weighted recursive partitioning tree used by the CUR baseline.
+ */
 class CURTree: public RTreeBASE{
     public:
 
 
+        /** Create an empty CURTree shell. */
         CURTree(){}
         
+        /** Reconstruct a CURTree from the serialized format. */
         CURTree(string filename){
             root_ = new RTreeNode();
             std::ifstream fin(filename);
@@ -34,7 +39,7 @@ class CURTree: public RTreeBASE{
             block_store_.FinishedConstruction();
         }
 
-
+        /** Build a CURTree from data plus the training query workload. */
         CURTree(std::vector<Point> data, std::vector<Query> queries){
             std::cout << std::setprecision(2) << std::fixed;
 
@@ -45,7 +50,7 @@ class CURTree: public RTreeBASE{
 
             block_store_.FinishedConstruction();
         }
-
+        /** Recursively build a CURTree subtree over weighted points. */
         RTreeNode* BuildTree(std::vector<WrappedPoint>::iterator vec_begin,std::vector<WrappedPoint>::iterator vec_end,size_t sort_dim){
             
             RTreeNode* node = new RTreeNode();

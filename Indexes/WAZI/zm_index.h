@@ -33,6 +33,10 @@
 #define assertm(exp, msg) std::assert(((void)msg, exp))
 
 
+/**
+ * Z-order mapped index that stores curve-ordered blocks plus a PGM lookup
+ * structure over block lower/upper bounds.
+ */
 class ZMIndex{
     public:
         pgm::PGMIndex<uint64_t, 64>* pgm_index_;
@@ -41,7 +45,7 @@ class ZMIndex{
 
         std::vector<uint64_t> block_lower_upper_bounds;
         std::vector<size_t> block_ids;
-
+        /** Build the ZM-index from an in-memory point set. */
         ZMIndex(std::vector<Point> data){
             rank_space_map_ = new RankSpaceMapper(data);
             std::vector<WrappedPoint> wrapped_data;
@@ -81,7 +85,7 @@ class ZMIndex{
         }
 
 
-
+        /** Execute a range query given precomputed rank-space bounds. */
         /**
         * @brief A function to perform a range query and return the query results along 
         *        with stats of range query processing. */
@@ -98,7 +102,7 @@ class ZMIndex{
 
             return result_vec;
         }
-
+        /** Project a rank-space query interval to candidate Z-order blocks. */
         void Projection(std::vector<size_t> &projected_blocks, WrappedPoint& query_low_rankspace,WrappedPoint& query_high_rankspace){
 
             auto approx_lower_range = pgm_index_->search(query_low_rankspace.curve_value_);
@@ -114,12 +118,12 @@ class ZMIndex{
             for(size_t it=exact_lower;it<=exact_upper;it+=2)
                 projected_blocks.push_back(block_ids[it]);
         }
-
+        /** Refine the projected block list using block MBR overlap checks. */
         void Refinement(std::vector<size_t> &refined_blocks, Query &query, std::vector<size_t> &projected_blocks){
             block_store_.RefinedBlocksForQueryFromLocalBlocks(query,projected_blocks,refined_blocks);
         } 
 
-
+        /** Scan the refined blocks and append matches into `result_vec`. */
         void Scan(std::vector<Point> &result_vec, Query &query, std::vector<size_t> &refined_blocks){
             block_store_.FilterPointsFromBlocksForQuery(query,refined_blocks,result_vec);
         }

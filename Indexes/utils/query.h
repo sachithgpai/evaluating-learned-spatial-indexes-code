@@ -14,11 +14,14 @@ class Query: public BoundingRectangle{
 
         Query(){}
 
+        /** Construct a query from its low/high corner points. */
         Query(const Point& a, const Point& b):BoundingRectangle(a,b){}
 
+        /** Convenience constructor for 2D axis-aligned query bounds. */
         Query(const double_t& a, const double_t& b,const double_t& c, const double_t& d):BoundingRectangle(Point(a,b),Point(c,d)){}
 
 
+        /** Count how many dimensions are active in the query mask. */
         int NumDim(){
             int result=0; 
             for(size_t i=0;i<Constants::DIM;i++)

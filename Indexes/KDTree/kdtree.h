@@ -16,15 +16,19 @@
 
 #include<algorithm>
 
+/**
+ * Binary KD-tree with block-based leaves and scan-based refinement.
+ */
 class KDTree{
     public:
         KDTreeNode* root_;
         BlockStore block_store_;
         size_t node_count_{};
 
-
+        /** Create an empty KD-tree shell. */
         KDTree(){}
 
+        /** Build a KD-tree from an in-memory point set. */
         KDTree(std::vector<Point> data){
             root_ = new KDTreeNode();
             root_->mbr_.SetToSpanWholeSpace();
@@ -33,7 +37,7 @@ class KDTree{
             block_store_.FinishedConstruction();
         }
 
-        /* A function to  build a KDTree from a given root node and  data points*/
+        /** Recursively build the KD-tree rooted at `node`. */
         void  BuildKDTree(KDTreeNode* node, std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end,size_t sort_dim){
             
             int num_datapoints = std::distance(it_data_begin,it_data_end);
@@ -70,7 +74,7 @@ class KDTree{
             node_count_+=2;
         }
 
-
+        /** Execute a range query by projection followed by block scanning. */
         std::vector<Point> RangeQuery(Query& query){
 
             std::vector<size_t> projected_cell_ids;
@@ -82,7 +86,7 @@ class KDTree{
             return result_vec;
         }
 
-
+        /** Collect the leaf blocks whose KD-tree regions overlap the query. */
         void Projection(std::vector<size_t> &projected_cell_ids, Query& query, KDTreeNode* node){
             if(node->is_leaf_){
                 projected_cell_ids.push_back(node->local_block_id_);
@@ -95,7 +99,7 @@ class KDTree{
                 Projection(projected_cell_ids,query,node->children_[1]);
         }
 
-
+        /** Scan the projected blocks and append matches into `result_vec`. */
         void Scan(std::vector<size_t> &projected_cell_ids, Query& query, std::vector<Point> &result_vec){
             std::sort(projected_cell_ids.begin(),projected_cell_ids.end());
             block_store_.FilterPointsFromBlocksForQuery(query, projected_cell_ids, result_vec);

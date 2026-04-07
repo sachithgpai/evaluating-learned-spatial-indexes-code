@@ -21,14 +21,16 @@
 #define RSTAR_MINBRANCH (RSTAR_BRANCH_FACTOR>>2)
 
 #define deb if(0)
-
-
-
+/**
+ * Incremental R*-tree builder used as one of the classical baselines.
+ */
 class RSTARTree: public RTreeBASE{
     public:
 
+        /** Create an empty R*-tree shell. */
         RSTARTree(){}
 
+        /** Reconstruct an R*-tree from the serialized format. */
         RSTARTree(string filename){
             root_ = new RTreeNode();
             std::ifstream fin(filename);
@@ -38,15 +40,13 @@ class RSTARTree: public RTreeBASE{
             block_store_.FinishedConstruction();
         }
 
-
+        /** Build an R*-tree from an in-memory point set. */
         RSTARTree(std::vector<Point> data){
             BuildRSTARTree(data);
             block_store_.FinishedConstruction();
         }
 
-        /**
-         * RSTARTree building function. Will need to return the pointer to the current node created so that the bounding box updation is done correctly for all internal nodes.
-        */
+        /** Bootstrap the incremental R*-tree construction from the initial block. */
         void BuildRSTARTree(std::vector<Point>& data){
 
             root_ = new RTreeNode();
@@ -71,7 +71,7 @@ class RSTARTree: public RTreeBASE{
         }
 
 
-
+        /** Insert one point and maintain the incremental R*-tree invariants. */
         void InsertPoint(Point pnt){
             // ChooseSubtree to find the leaf node to insert. Also get all the nodes that are accessed in the way.
             std::vector<RTreeNode*> parents;
@@ -151,7 +151,7 @@ class RSTARTree: public RTreeBASE{
 
         }
 
-        /* Function splits the internal nodes of an overflowing node into two. The function sorts the array according to best sort dim and returns the location of split*/
+        /** Split an overflowing internal node and return the split position. */
         size_t SplitNodesIntoTwo(std::vector<RTreeNode*>& temp_arr){
 
             double_t min_perimeter = std::numeric_limits<double_t>::max();

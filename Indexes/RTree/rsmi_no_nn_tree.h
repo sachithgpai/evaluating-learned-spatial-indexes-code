@@ -1,4 +1,5 @@
-// ! UNUSED. thiw is was using a local model. New version saves it like an RTreeBase.
+// ! UNUSED. This version used local models directly; the newer path stores the
+// ! learned structure in an RTree-like serialized format.
 
 #ifndef RSMI_NO_NN_TREE_H
 #define RSMI_NO_NN_TREE_H
@@ -8,7 +9,9 @@
 #include"../utils/bounding_rectangle.h"
 #include"../utils/local_model.h"
 
-
+/**
+ * Legacy node type for the non-neural RSMI fallback.
+ */
 class RSMINodeNoNN{
     public:
         BoundingRectangle mbr_;
@@ -17,20 +20,19 @@ class RSMINodeNoNN{
         size_t local_model_id_;
         bool is_leaf_;
 
+        /** Create an empty leaf node. */
         RSMINodeNoNN(){
             is_leaf_=true;
             local_model_id_=0;
         }
 
+        /** Recursively delete the child subtrees. */
         ~RSMINodeNoNN(){
             for(auto child: children_)
                 delete child;
         }
 
 };
-
-
-
 /*
 An Rtree base class where common Rtree functions like Range query, Write-tree and read-tree are implemented.
 */
@@ -42,9 +44,10 @@ class RSMITreeNoNN{
         BlockStore block_store_;
         size_t node_cnt_{};
 
-
+        /** Create an empty legacy RSMI shell. */
         RSMITreeNoNN(){}
 
+        /** Load the serialized structure and reconstruct the leaf local models. */
         RSMITreeNoNN(string filename){
             std::cout<<"Loading RSMI RTree from "<<filename<<"\n";
             root_ = new RSMINodeNoNN();
@@ -54,14 +57,12 @@ class RSMITreeNoNN{
             block_store_.FinishedConstruction();
         }
 
-
+        /** Release the recursively owned node hierarchy. */
         ~RSMITreeNoNN(){
             delete root_;
         }
 
-
-
-        
+        /** Deserialize one subtree and reconstruct any leaf local model. */
         void ReadTree(std::ifstream& fin,RSMINodeNoNN* node){
             size_t num_children, local_model_size;
             double_t x,y;
@@ -96,7 +97,7 @@ class RSMITreeNoNN{
         }
 
 
-
+        /** Execute a range query using overlap projection and exact refinement. */
         std::vector<Point> RangeQuery(Query& query){
             std::vector<size_t> projected_cells;
             Projection(projected_cells,query,root_);
@@ -108,7 +109,7 @@ class RSMITreeNoNN{
             Scan(refined_blocks,query,result_vec);
             return result_vec;
         }
-
+        /** Collect leaf local-model IDs whose regions overlap the query. */
         void Projection(std::vector<size_t> &projected_cells, Query& query, RSMINodeNoNN* node){
             if(node->is_leaf_){
                 projected_cells.push_back(node->local_model_id_);
@@ -119,14 +120,14 @@ class RSMITreeNoNN{
                 if(query.IsThereOverlap(child->mbr_))
                     Projection(projected_cells,query,child);
         }
-
+        /** Refine projected local models into physical block IDs. */
         void Refinement(std::vector<size_t> &refined_blocks, Query &query, std::vector<size_t> &projected_cells)
         {
             for(auto& cell: projected_cells)
                 cell_list_[cell].RefinedBlocksForQuery(query,block_store_,refined_blocks);
         } 
 
-
+        /** Scan the refined blocks in sorted order. */
         void Scan(std::vector<size_t> &refined_blocks, Query& query, std::vector<Point> &result_vec){
             std::sort(refined_blocks.begin(),refined_blocks.end());
             block_store_.FilterPointsFromBlocksForQuery(query,refined_blocks,result_vec);

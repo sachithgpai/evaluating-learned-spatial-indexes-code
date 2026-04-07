@@ -16,6 +16,9 @@
 #include"../utils/sort_tools.h"
 
 
+/**
+ * FLOOD-style adaptive grid index with block-based refinement.
+ */
 class FloodIndex{
   public:
       int dim_order_[Constants::DIM];                 // the dimension order. [0] is will have the dimension on which the first sorting is done.
@@ -24,18 +27,19 @@ class FloodIndex{
       // std::vector<LocalModel> cell_list_;             // A vector to store all the data associated with a grid cell.
       BlockStore block_store_;
 
-
+      /** Initialize the FLOOD grid layout from raw pointer arrays. */
       FloodIndex(int *dim_order,int *split_per_dim){
         std::copy(dim_order, dim_order+Constants::DIM, dim_order_);
         std::copy(split_per_dim, split_per_dim+Constants::DIM, num_col_per_dim_); 
       }   
 
-
+      /** Initialize the FLOOD grid layout from `std::array` inputs. */
       FloodIndex(std::array<int,Constants::DIM> dim_order,std::array<int,Constants::DIM> split_per_dim){
         std::copy(dim_order.begin(), dim_order.end(), dim_order_);
         std::copy(split_per_dim.begin(), split_per_dim.end(), num_col_per_dim_); 
       }
       
+      /** Learn the split points and materialize the block store. */
       void LoadElements(std::vector<Point> &data,bool disk_backup = true){  
         LearnSplitPointsPerDim(data);
         BoundingRectangle mbr;
@@ -58,7 +62,7 @@ class FloodIndex{
 
         return result_vec;
       }
-
+      /** Map a query to candidate FLOOD cells. */
       void Projection(std::vector<size_t> &projected_cells, Query &query){
         
         // the range of splits to follow for the index.
@@ -75,7 +79,7 @@ class FloodIndex{
       }
 
 
-
+      /** Scan the projected blocks and append matches into `result_vec`. */
       void Scan( std::vector<size_t> &refined_blocks, Query &query, std::vector<Point> &result_vec){
         block_store_.FilterPointsFromBlocksForQuery(query,refined_blocks,result_vec);
       }
@@ -85,7 +89,7 @@ class FloodIndex{
 
   private:
 
-      /* A recursive function to step through and filter all the cells based on the columns*/
+      /** Recursively enumerate all cell IDs touched by the query ranges. */
       void CollectCells(int dim_order_pos,int running_cell_id,const std::vector<int>& col_low, const std::vector<int>& col_high, std::vector<size_t>& collected_cells){
         if(dim_order_pos==Constants::DIM){
           collected_cells.push_back(running_cell_id);
@@ -100,7 +104,7 @@ class FloodIndex{
         return;
       }
 
-      /* Learn adaptive split locations for the flood index  */
+      /** Learn one-dimensional split locations for every indexed dimension. */
       void LearnSplitPointsPerDim(std::vector<Point> &data){
         for(size_t d=0;d<Constants::DIM;d++){
           if(num_col_per_dim_[d]==0) continue;       
@@ -121,7 +125,7 @@ class FloodIndex{
         }
       }
 
-
+      /** Recursively partition the input and assign each cell into one block. */
       void LoadElementsHelper(std::vector<Point>::iterator vec_begin,std::vector<Point>::iterator vec_end,int priority_order_pos,BoundingRectangle &mbr){
 
         

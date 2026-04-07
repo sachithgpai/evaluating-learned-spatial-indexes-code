@@ -16,8 +16,10 @@ class RTreeBASE{
         BlockStore block_store_;
         size_t node_cnt_{};
 
+        /** Create an empty R-tree shell. */
         RTreeBASE(){}
         
+        /** Reconstruct an R-tree from the serialized on-disk format. */
         RTreeBASE(string filename){
             root_ = new RTreeNode();
             std::ifstream fin(filename);
@@ -27,10 +29,12 @@ class RTreeBASE{
             block_store_.FinishedConstruction();
         }
 
+        /** Release the recursively owned node hierarchy. */
         ~RTreeBASE(){
             delete root_;
         }
 
+        /** Serialize the subtree rooted at `node` into `fout`. */
         void WriteTree(std::ofstream& fout,RTreeNode* node){
             fout<<std::setprecision(9)<<node->children_.size()<<" "<<node->mbr_.low_.elements_[0]<<" "<<node->mbr_.low_.elements_[1]<<" "<<node->mbr_.high_.elements_[0]<<" "<<node->mbr_.high_.elements_[1]<<"\n";
 
@@ -44,8 +48,7 @@ class RTreeBASE{
                     WriteTree(fout,child);
         }
 
-
-        
+        /** Deserialize one subtree from `fin` into `node`. */
         void ReadTree(std::ifstream& fin,RTreeNode* node){
             size_t num_children, block_size;
             double_t x,y;
@@ -72,8 +75,7 @@ class RTreeBASE{
             
         }
 
-
-
+        /** Execute a range query by projection followed by block scanning. */
         std::vector<Point> RangeQuery(Query& query){
             std::vector<size_t> refined_blocks;
             Projection(refined_blocks,query,root_);
@@ -82,7 +84,7 @@ class RTreeBASE{
             Scan(refined_blocks,query,result_vec);
             return result_vec;
         }
-
+        /** Collect leaf block IDs whose node regions overlap the query. */
         void Projection(std::vector<size_t> &refined_blocks, Query& query, RTreeNode* node){
             if(node->is_leaf_){
                 refined_blocks.push_back(node->local_block_id_);
@@ -94,14 +96,12 @@ class RTreeBASE{
                     Projection(refined_blocks,query,child);
         }
 
-
+        /** Scan the projected blocks in sorted order. */
         void Scan(std::vector<size_t> &refined_blocks, Query& query, std::vector<Point> &result_vec){
             std::sort(refined_blocks.begin(),refined_blocks.end());
             block_store_.FilterPointsFromBlocksForQuery(query,refined_blocks,result_vec);
         }
-
-
-        /* PRINTING AND DEBUG FUNCTIONS*/
+        /** Print the tree structure for debugging. */
         void PrintTree(RTreeNode* node,string deb_string="|-> "){
             
             std::cout<<deb_string<<((node->is_leaf_)?" LEAF ":"")<<((node->is_leaf_)?(node->local_block_id_):0); 

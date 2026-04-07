@@ -16,13 +16,7 @@
 #define SortX 0
 #define SortY 1
 
-
-
-
-
-
-
-
+/** Lower-bound style binary search over a sorted vector. */
 template<typename T>
 int BinarySearch(std::vector<T> arr, T val){
   int first = 0, last=arr.size()-1,mid;
@@ -35,8 +29,7 @@ int BinarySearch(std::vector<T> arr, T val){
   return last;
 
 }
-
-
+/** Lower-bound style binary search restricted to `[first, last]`. */
 template<typename T>
 int32_t BinarySearch(std::vector<T> arr, T val,int32_t first, int32_t last){
   // std::cout<<"BinarySearch val "<<val<<" first "<<first<<" last "<<last<<"\n";
@@ -54,9 +47,7 @@ int32_t BinarySearch(std::vector<T> arr, T val,int32_t first, int32_t last){
 }
 
 
-
-
-
+/** Comparator that sorts `Point` instances by one dimension. */
 class SortOrderer {
   size_t i;
 public:
@@ -67,7 +58,7 @@ public:
 };
 
 
-
+/** Comparator that sorts wrapped points by one geometric dimension. */
 class WrappedPointSortOrderer {
   size_t i;
 public:
@@ -77,7 +68,7 @@ public:
   }
 };
 
-
+/** Comparator that sorts wrapped points by one rank-space dimension. */
 class WrappedPointRankOrderer {
   size_t i;
 public:
@@ -87,7 +78,7 @@ public:
   }
 };
 
-
+/** Comparator that sorts wrapped points by Morton/Z-order value. */
 class WrappedPointCurveValueOrder {
     public:
     bool operator()(const WrappedPoint& a, const WrappedPoint& b)
@@ -95,9 +86,9 @@ class WrappedPointCurveValueOrder {
         return a.curve_value_ < b.curve_value_;
     }
 };
-
-
-/*Comparatory function to partition points based on a point and a given dimension*/
+/**
+ * Predicate used with `std::partition` to split points around one dimension.
+ */
 class ComparatorPointPartition {
     public:
     Point orig_;
@@ -118,9 +109,9 @@ class ComparatorPointPartition {
 
     void SetDimSplitValue(size_t d,double_t split){ orig_.elements_[d]=split; d_=d;}
 };
-
-
-/* A class which takes a set of points and creates a rank space mapper for the data*/
+/**
+ * Approximate rank-space mapper backed by PGM indexes on each dimension.
+ */
 class RankSpaceMapper{
   public:
     /* Settting the default epsilon paramter (1024)*/
@@ -130,7 +121,7 @@ class RankSpaceMapper{
     std::vector<double_t> sorted_1dim;
 
 
-    /*Constructor to build and train two pgm models*/
+    /** Build one PGM index per dimension over the sorted coordinates. */
     RankSpaceMapper(std::vector<Point>& data){
       sorted_0dim.reserve(data.size());
       for(auto& pnt: data) sorted_0dim.push_back(pnt.elements_[0]);
@@ -144,6 +135,7 @@ class RankSpaceMapper{
 
     }
 
+    /** Transform a geometric point into its wrapped rank-space form. */
     WrappedPoint Transform(const Point& a){
         // std::cout<<"Transform"<<"\n";
         WrappedPoint wrapped_point(a);
@@ -163,9 +155,7 @@ class RankSpaceMapper{
         // std::cin.get();
         return wrapped_point;
     }
-
-
-
+    /** Update an existing wrapped point in place with rank coordinates. */
     void Transform(WrappedPoint& wrp_pt){
         // std::cout<<"Transform"<<"\n";
         auto range0 = pgm_index_0->search(wrp_pt.elements_[0]);
@@ -182,6 +172,7 @@ class RankSpaceMapper{
 
     }
 
+    /** Rewrite wrapped points so each dimension has dense integer ranks. */
     void Reintegerize(std::vector<WrappedPoint>::iterator vec_begin,std::vector<WrappedPoint>::iterator vec_end){
       std::sort(vec_begin,vec_end,WrappedPointSortOrderer(0));
       uint32_t ix=0;
@@ -199,15 +190,7 @@ class RankSpaceMapper{
 };
 
 
-
-
-
-
-
-
-
-
-/* A sorter function used to sort based on a dimension according to query lower bound*/
+/** Comparator that orders queries by one lower-bound coordinate. */
 class QuerySortOrderer {
   size_t i;
 public:
@@ -217,8 +200,7 @@ public:
   }
 };
 
-
-/* A sorter function used to sort based on a dimension according to query upper bound*/
+/** Comparator that orders queries by one upper-bound coordinate. */
 class QuerySortOrdererUpperBound {
   size_t i;
 public:
@@ -228,12 +210,12 @@ public:
   }
 };
 
-
-
-
-/* Function to compute the number of queries that overlap a point 
-TODO: IMPROVE efficiency for better build time. Same as CUR tree
-*/
+/**
+ * Wrap points and annotate each with the number of queries that contain it.
+ *
+ * TODO: Improve efficiency; this currently scans the candidate point range for
+ * each query similarly to the CUR-tree weighting pass.
+ */
 std::vector<WrappedPoint> WeightPointsWithQuery(std::vector<Point> data, std::vector<Query>& queries){
 
     WrappedPointSortOrderer x_sorter(0);
@@ -254,9 +236,7 @@ std::vector<WrappedPoint> WeightPointsWithQuery(std::vector<Point> data, std::ve
     return wrapped_data;
 }
 
-
-
-
+/** Compute the Morton/Z-order value from the wrapped rank coordinates. */
 uint64_t compute_Z_value(WrappedPoint& wrap_pt)
 {
 	uint64_t result = 0;
@@ -275,9 +255,7 @@ uint64_t compute_Z_value(WrappedPoint& wrap_pt)
 	return result;
 }
 
-
-
-
+/** Construct a well-seeded random engine of type `T`. */
 template <typename T = std::mt19937>
 auto random_generator() -> T {
     auto constexpr seed_bytes = sizeof(typename T::result_type) * T::state_size;
@@ -289,7 +267,7 @@ auto random_generator() -> T {
     return T{seed_seq};
 }
 
-
+/** Generate a random alphanumeric string of the requested length. */
 auto generate_random_alphanumeric_string(std::size_t len) -> std::string {
     static constexpr auto chars =
         "0123456789"

@@ -20,11 +20,14 @@
 #include"../KDTree/kdtree.h"
 
 
+/**
+ * Query-driven tree that reuses the KDTree node/block layout.
+ */
 class QDTree:public KDTree{
     public:
         ComparatorPointPartition temp_comparator_point_;  // dummy point for use in partition() with BulkLoad
 
-
+        /** Build a randomly split QDTree directly from data. */
         QDTree(std::vector<Point> data,size_t TARGET_BLOCK_SIZE=BLOCK_SIZE,bool disk_backup = true){
             root_ = new KDTreeNode();
             root_->mbr_.SetToSpanWholeSpace();
@@ -33,10 +36,10 @@ class QDTree:public KDTree{
             BuildRandomQdTree(root_,data.begin(),data.end(),TARGET_BLOCK_SIZE);
             if(disk_backup) block_store_.FinishedConstruction();
         }
-
-        
-
-        /*Function to create a random QDTree (Same as BuildKDTree with random dim for split and pick median)*/
+        /**
+         * Recursively create a random QDTree using random split dimensions and
+         * mid-point split values.
+         */
         void BuildRandomQdTree(KDTreeNode *node,std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end,size_t TARGET_BLOCK_SIZE=BLOCK_SIZE){
 
             int num_datapoints = std::distance(it_data_begin,it_data_end);
@@ -73,8 +76,7 @@ class QDTree:public KDTree{
 
             node_count_+=2;
         }
-
-        // Load QD-tree from a file
+        /** Load a trained QDTree structure from disk and bulk-load the data. */
         QDTree(std::vector<Point> data,std::string filename){
 
             root_ = new KDTreeNode();
@@ -86,7 +88,7 @@ class QDTree:public KDTree{
 
             block_store_.FinishedConstruction();
         }
-
+        /** Read the serialized split decisions from `file`. */
         void LoadQDTree(std::string file){
             std::ifstream fin(file);
             std::cout<<"Open file"<<file<<"\n";
@@ -102,7 +104,7 @@ class QDTree:public KDTree{
             }
         }
 
-
+        /** Insert one serialized split node into the in-memory tree. */
         /**
          * @brief Helper function to  `loadTree` to insert each node
          */
@@ -132,9 +134,7 @@ class QDTree:public KDTree{
         
         }
 
-        /** 
-         * @brief Helper function to bulk load data.
-         */
+        /** Bulk-load data into a preexisting QDTree structure. */
         void BulkLoadData(KDTreeNode *node,std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end){
             
             if(node->is_leaf_){
@@ -153,9 +153,7 @@ class QDTree:public KDTree{
 
         }
 
-
-
-
+        /** Serialize the non-leaf split decisions of the trained QDTree. */
         void SaveQDTree(std::ofstream& fout,size_t node_id, KDTreeNode* node){
 
             fout<<node_id<<" "<<node->split_dim_<<" "<<node->split_value_<<"\n";
@@ -169,11 +167,9 @@ class QDTree:public KDTree{
         
 };
 
-
-
-
-
-// Random sampling based QD-Tree
+/**
+ * Random-search the QDTree structure using a sampled subset of the workload.
+ */
 void QDTreeTrainerRandomSearch(std::vector<Point> data,std::vector<Query> &queries,std::string filename,double_t sampling_ratio = 0.1){
     
     srand(time(NULL)); 

@@ -31,6 +31,10 @@
 
 enum QueryCases { AA, BB, CC, DD, AB, AC, BD, CD, AD};
 
+/**
+ * Sampling-driven ZTree variant that optimizes partitions with density
+ * estimators derived from both data and query workloads.
+ */
 class SamplZTree: public ZTree{
     
     public:
@@ -43,7 +47,7 @@ class SamplZTree: public ZTree{
 
     size_t random_sample_size_,dens_est_data_gran_,dens_est_query_gran_;
     double_t skip_alpha_;
-
+    /** Build the sampling-based ZTree from data plus a training query set. */
     SamplZTree(std::vector<Point> &dataset, std::vector<Query> &queries, bool skipping_awareness = true, uint32_t random_sample_size=100,uint32_t dens_est_data_gran=16384, uint32_t dens_est_query_gran=256):ZTree(skipping_awareness),random_sample_size_(random_sample_size),dens_est_data_gran_(dens_est_data_gran),dens_est_query_gran_(dens_est_query_gran){
 
 
@@ -91,7 +95,7 @@ class SamplZTree: public ZTree{
         
     }
 
-
+    /** Construct the density estimators used by the split objective. */
     void ConstructDensityEstimators(std::vector<Point> &dataset, std::vector<Query> &queries, BoundingRectangle mbr){
 
         datapoint_density_estimator_ = new DensEstTree(dataset, dens_est_data_gran_,mbr);
@@ -133,7 +137,7 @@ class SamplZTree: public ZTree{
         std::cout<<"No isseus with queryhigh estimator"<<"\n";
     }
 
-
+    /** Recursively build the sampling-driven ZTree structure. */
     /**
      * @brief Function takes the data points and build a Ztree. 
      * Should be identical for all versions of Ztree
@@ -195,7 +199,7 @@ class SamplZTree: public ZTree{
                                     node->children_[3]->pages_in_subtree_;
 
     }
-
+    /** Search for a good split partition under the learned objective. */
     /**
      * @brief A function to sample `random_sample_size_` points uniformly from the dataspace covered by
      *      the current node and pick the best point based on the `Objective` function. 
@@ -265,9 +269,7 @@ class SamplZTree: public ZTree{
 
     }
 
-
-
-    /** Objective function based on decoupled queries*/
+    /** Evaluate one candidate split under the decoupled query objective. */
     std::pair<long double,bool> Objective(ZtreeNode *node,Point split){        
         long double na_raw,nb_raw,nc_raw,nd_raw,ea,eb,ec,ed,sa,sb,sc,sd;
         long double na,nb,nc,nd;

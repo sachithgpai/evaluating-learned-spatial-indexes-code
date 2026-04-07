@@ -17,6 +17,9 @@
 #include"../utils/bounding_rectangle.h"
 #include"../utils/local_model.h"
 
+/**
+ * Node used by the neural RSMI hierarchy.
+ */
 class RSMINode{
     public:
         BoundingRectangle mbr_;
@@ -30,11 +33,13 @@ class RSMINode{
         size_t local_model_id_;
         bool is_leaf_;
 
+        /** Create an empty leaf node. */
         RSMINode(){
             is_leaf_=true;
             local_model_id_=0;
         }
 
+        /** Recursively delete the child subtrees. */
         ~RSMINode(){
             for(auto child: children_)
                 delete child;
@@ -43,16 +48,19 @@ class RSMINode{
         
 };
 
-
+/**
+ * Learned R-tree variant that routes through TorchScript classifiers.
+ */
 class RSMITree{
     public:
         RSMINode* root_;
         std::vector<LocalModel> cell_list_; 
         BlockStore block_store_;
         size_t node_cnt_{};
-
+        /** Create an empty RSMI shell. */
         RSMITree(){}
 
+        /** Load the trained tree structure and then bulk-load the data. */
         RSMITree(std::string foldername,std::vector<Point>& data){
             root_ = new RSMINode();
 
@@ -68,7 +76,7 @@ class RSMITree{
 
             block_store_.FinishedConstruction();
         }
-
+        /** Recursively deserialize the RSMI hierarchy and its child map. */
         size_t LoadRSMITree(std::ifstream& fin,RSMINode* node,std::string foldername){
             std::string torchscript_filename;
             size_t num_children,child_num;
@@ -89,7 +97,7 @@ class RSMITree{
             return child_num;
         }
 
-
+        /** Route the data points through the learned hierarchy into leaf models. */
         void InsertDataIntoRSMI(RSMINode* node,std::vector<Point>& data){
             
             
@@ -141,8 +149,7 @@ class RSMITree{
             }
 
         }
-
-        /* TODO: Range query required functions. */
+        /** Execute a range query using learned projection plus exact refinement. */
 
         std::vector<Point> RangeQuery(Query& query){
             std::vector<size_t> projected_cells;
@@ -155,7 +162,7 @@ class RSMITree{
             Scan(refined_blocks,query,result_vec);
             return result_vec;
         }
-
+        /** Project a query to candidate learned leaf models. */
         void Projection(std::vector<size_t> &projected_cells, Query& query, RSMINode* node){
             if(node->is_leaf_){
                 projected_cells.push_back(node->local_model_id_);
@@ -183,7 +190,7 @@ class RSMITree{
                 if(node->child_map_.contains(bucket_num))
                     Projection(projected_cells,query,node->children_[node->child_map_[bucket_num]]);
         }
-
+        /** Execute a fallback overlap-based projection using node MBRs only. */
         std::vector<Point> AccurateRangeQuery(Query& query){
             std::vector<size_t> projected_cells;
             AccurateProjection(projected_cells,query,root_);
@@ -195,7 +202,7 @@ class RSMITree{
             Scan(refined_blocks,query,result_vec);
             return result_vec;
         }
-
+        /** Recursive helper for the accurate overlap-based projection path. */
         void AccurateProjection(std::vector<size_t> &projected_cells, Query& query, RSMINode* node){
             if(node->is_leaf_){
                 projected_cells.push_back(node->local_model_id_);
@@ -206,15 +213,14 @@ class RSMITree{
                 if(query.IsThereOverlap(child->mbr_))
                     Projection(projected_cells,query,child);
         }
-
+        /** Refine learned cells into physical block IDs. */
         void Refinement(std::vector<size_t> &refined_blocks, Query &query, std::vector<size_t> &projected_cells)
         {
             for(auto& cell: projected_cells)
                 cell_list_[cell].RefinedBlocksForQuery(query,block_store_,refined_blocks);
         } 
 
-
-
+        /** Scan the refined blocks in sorted order. */
         void Scan(std::vector<size_t> &refined_blocks, Query& query, std::vector<Point> &result_vec){
             std::sort(refined_blocks.begin(),refined_blocks.end());
             block_store_.FilterPointsFromBlocksForQuery(query,refined_blocks,result_vec);

@@ -23,7 +23,7 @@
 #include"ztree_leaflist_metadata.h"
 
 /**
- * @brief Node for intermidiate node of a ZTree.
+ * @brief Node for the quadtree-style ZTree hierarchy.
  */
 class ZtreeNode{
     public:
@@ -36,11 +36,13 @@ class ZtreeNode{
         uint32_t pages_in_subtree_{},node_depth_;
 
         
+        /** Construct a node at a specific depth. */
         ZtreeNode(uint32_t depth=0):node_depth_(depth){
             ordering_ = false;
             is_leaf_ = false;
         }
 
+        /** Print the node bounds and partition point for debugging. */
         void Print(){
             std::cout<<" (";
             for(auto i=0;i<Constants::DIM;i++)

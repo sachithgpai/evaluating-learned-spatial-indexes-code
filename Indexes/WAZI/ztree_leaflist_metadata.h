@@ -8,7 +8,9 @@
 #include"../utils/local_model.h"
 
 
-/*Class forming the leaf list with the forward pointers*/
+/**
+ * Metadata stored for each leaf in the ZTree leaf list.
+ */
 class ZtreeLeaflistMetadata{
     public:
         BoundingRectangle mbr_;
@@ -17,10 +19,13 @@ class ZtreeLeaflistMetadata{
 
 
 
+        /** Default-construct an empty metadata record. */
         ZtreeLeaflistMetadata(){}
 
+        /** Seed the metadata with the leaf MBR. */
         ZtreeLeaflistMetadata(BoundingRectangle mbr):mbr_(mbr){}
 
+        /** Initialize all forward iterators to the current leaf position. */
         void InitializeFwdIters(size_t id){
             fwd_iter_1_ = id;             
             fwd_iter_2_ = id;
@@ -28,6 +33,7 @@ class ZtreeLeaflistMetadata{
             fwd_iter_4_ = id;
         }
 
+        /** Encode which directional skip cases apply for `query`. */
         uint8_t CheckFwdIterCases(const Query query){
             uint8_t case_mask =0;
             if(mbr_.high_.elements_[0]<query.low_.elements_[0]) case_mask |= 1;
@@ -37,7 +43,7 @@ class ZtreeLeaflistMetadata{
             return case_mask;
         }
 
-
+        /** Print the leaf-list metadata for debugging. */
         void Print(){
             std::cout<<" LocalModel (";
             for(auto i=0;i<Constants::DIM;i++)

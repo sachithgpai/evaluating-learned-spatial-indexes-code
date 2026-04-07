@@ -57,6 +57,7 @@ class WeightedDensEstTree{
     }
 
 
+    /** Recursively release the forest roots. */
     ~WeightedDensEstTree(){ 
 
         for(int i=0;i<NUM_WEIGHTED_TREES_IN_FOREST;i++)
@@ -70,6 +71,7 @@ class WeightedDensEstTree{
 
 
 
+    /** Recursively build one weighted density-estimation tree. */
     /**
     * @brief A helper function to build the tree.
     */
@@ -112,6 +114,7 @@ class WeightedDensEstTree{
     }
 
 
+    /** Compute cumulative query-overlap weights for one iterator range. */
     double_t CalculateWeightedCount(std::vector<WrappedPoint>::iterator data_begin, std::vector<WrappedPoint>::iterator data_end){
         double_t result=0;
         for(auto it=data_begin;it!=data_end;it++){
@@ -124,6 +127,7 @@ class WeightedDensEstTree{
 
 
 
+    /** Estimate the weighted count that falls inside `mbr`. */
     /**
     * @brief The actual exposed function that estimates the counts of data in a given box.
     *        - It estimates the number of points returned by both the trees.
@@ -141,6 +145,7 @@ class WeightedDensEstTree{
 
     
 
+    /** Recursive helper for weighted range-count estimation. */
     /**
     * @brief The recursive function that goes through the density estimation tree and calculates
     *        counts within a range query.

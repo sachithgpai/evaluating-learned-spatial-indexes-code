@@ -34,7 +34,7 @@
 
 
 /**
- * @brief An object for tree.
+ * Base quadtree-style Z-order index with optional skipping-aware traversal.
  */
 class ZTree{
     public:
@@ -49,9 +49,7 @@ class ZTree{
         uint32_t metric_points_scanned_{};
         uint32_t metric_mbrs_checked_{};
 
-        /**
-         * @brief Constructor for a new empty lzc Tree object.
-         */
+        /** Construct an empty ZTree shell. */
         ZTree(bool skipping_awareness = false){
             num_datapoints_ = 0;
             root_ = NULL;
@@ -60,7 +58,7 @@ class ZTree{
             tree_height_ = 0;
             is_skipping_aware_ = skipping_awareness;
         }
-
+        /** Descend the tree to the leaf that owns `new_point`. */
         /**
          * @brief Return pointer to the leaf node for `new_point`
          * NOTE: The ordering is not important now as the nodes are stored in default order.
@@ -75,7 +73,7 @@ class ZTree{
             }
             return curr_node;
         }
-
+        /** Bulk-load the leaf blocks after the tree structure is fixed. */
         /** TODO:
          * @brief Given a set of data points, this function iteratively partitions the points and inserts
          * them to respective pages.
@@ -85,7 +83,7 @@ class ZTree{
             BulkLoadData(root_,dataset.begin(),dataset.end());
             block_store_.FinishedConstruction();
         }
-
+        /** Recursive helper that bulk-loads one subtree into block pages. */
         /** TODO:
          * @brief Helper function to bulk load data.
          */
@@ -123,12 +121,7 @@ class ZTree{
 
         }
 
-
-
-
-        /** 
-         * @brief Function to perform a preorder traversal and save the tree in a linear format.
-         */
+        /** Save the current tree structure in its preorder text format. */
         void WriteTree(std::string file){
             std::ofstream fout(file);
             fout<<root_->mbr_.low_.elements_[0]<<" "<<root_->mbr_.low_.elements_[1]<<" "<<root_->mbr_.high_.elements_[0]<<" "<<root_->mbr_.high_.elements_[1];
@@ -138,7 +131,7 @@ class ZTree{
                 if(root_->children_[i]!=NULL)
                     WriteSubTree(fout,root_->children_[i],i+1);
         }
-
+        /** Recursive helper for serializing one subtree. */
         /** DONE
          * @brief Helper recursive function for `WriteTree`
          */
@@ -152,7 +145,7 @@ class ZTree{
                     WriteSubTree(fout,node->children_[i],id*4+i+1);
         }
 
-
+        /** Load a serialized tree structure from disk. */
         /**
          * @brief A function to load the Z-Index from a given file
          */
@@ -180,7 +173,7 @@ class ZTree{
                 CalculateFwdPointers();
         }
 
-
+        /** Insert one serialized node entry into the in-memory tree. */
         /**
          * @brief Helper function to  `ReadTree` to insert each node
          */
@@ -252,8 +245,7 @@ class ZTree{
                                 Point(curr_node->mbr_.high_.elements_[0], curr_node->mbr_.high_.elements_[1]));
         
         }
-
-        /*Update the page counts in each subtree once the whole tree is built.*/
+        /** Recompute the number of pages contained in each subtree. */
         void UpdatePagesInSubtree(ZtreeNode* node){
             if(node->is_leaf_){
                 node->pages_in_subtree_=1;

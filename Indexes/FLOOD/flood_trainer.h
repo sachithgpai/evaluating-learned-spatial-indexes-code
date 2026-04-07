@@ -11,9 +11,10 @@
 #include"flood.h"
 
 
-/*
-Function to random search on flood index configuration indexes on a sample of queries and return the best performing configuration.
-*/
+/**
+ * Random-search the FLOOD configuration space using an in-memory dataset/query
+ * workload and return the best split order plus split counts.
+ */
 
 std::pair<std::array<int,Constants::DIM>, std::array<int,Constants::DIM>> FloodTrainerRandomSearch(std::vector<Point> &datapoints,std::vector<Query> &queries){
     int since_last_improvement=0,max_samples=500;
@@ -51,6 +52,10 @@ std::pair<std::array<int,Constants::DIM>, std::array<int,Constants::DIM>> FloodT
 
 }
 
+/**
+ * Convenience overload that loads points and queries from files before running
+ * the same random search procedure.
+ */
 std::pair<std::array<int,Constants::DIM>, std::array<int,Constants::DIM>> FloodTrainerRandomSearch(std::string datapoint_filename,std::string query_filename){
     auto start = std::chrono::system_clock::now();
     std::ifstream point_file;

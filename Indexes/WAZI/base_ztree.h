@@ -22,10 +22,13 @@
 #include"../utils/constants.h"
 
 
-
+/**
+ * Median-split baseline ZTree builder.
+ */
 class BaseZTree: public ZTree{
     public:
 
+    /** Build the baseline ZTree from a dataset. */
     BaseZTree(std::vector<Point> &dataset,bool skipping=false):ZTree(skipping){
         num_datapoints_ = dataset.size();
         double_t data_low_x,data_low_y,data_high_x,data_high_y;
@@ -62,7 +65,7 @@ class BaseZTree: public ZTree{
         
     }
 
-
+    /** Recursively build the baseline ZTree structure. */
     /**
      * @brief Function takes the data points and build a Ztree. 
      * Should be identical for all versions of Ztree
@@ -129,7 +132,7 @@ class BaseZTree: public ZTree{
         return;
     }
 
-
+    /** Pick the median split point in each dimension for one node. */
     Point FindOptimalSplitPoint(ZtreeNode *node,
                             std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end){
 

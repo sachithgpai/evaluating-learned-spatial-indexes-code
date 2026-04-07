@@ -16,15 +16,18 @@
 #include"sort_tools.h"
 
 
-/* A page level block for all indices.*/
+/**
+ * In-memory representation of one block/page of points.
+ */
 class Block{
     public:
         std::vector<Point> block_data_;
 
     
-
+        /** Materialize a block from an existing point vector. */
         Block(std::vector<Point> & data):block_data_(data){}
 
+        /** Materialize a block from an iterator range. */
         Block(const std::vector<Point>::iterator & it_data_begin, const std::vector<Point>::iterator & it_data_end){
             // block_data_.reserve(BLOCK_SIZE+2);
             // assert(std::distance(it_data_begin,it_data_end)<=BLOCK_SIZE);
@@ -33,11 +36,12 @@ class Block{
 
         Block(){}
 
-
+        /** Replace the block contents with a new iterator range. */
         void AssignPoints(std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end){
             block_data_.assign(it_data_begin,it_data_end);
         }
 
+        /** Append points that satisfy `query` into `result_vec`. */
         void FilterPointsForQuery(Query &query, std::vector<Point>& result_vec){
             size_t block_size_here = block_data_.size();
             for(auto& pnt: block_data_)
@@ -45,21 +49,29 @@ class Block{
                     result_vec.push_back(pnt);
         }
 
+        /** Copy the full block contents into the caller-owned result buffer. */
         void CopyAllPointsIntoResult(std::vector<Point>& result_vec){
             result_vec.insert(result_vec.end(),block_data_.begin(),block_data_.end());
         }
 
+        /** Append a single point to the block. */
         void InsertPoint(Point& pnt){
             block_data_.push_back(pnt);
         }
 
+        /** Return the number of points currently stored in the block. */
         size_t BlockDataSize(){
             return block_data_.size();
         }
 };
 
 
-/* A class which stores all the blocks.*/
+/**
+ * Shared block store used by multiple index implementations.
+ *
+ * It tracks per-block MBR metadata in memory and can optionally materialize a
+ * disk-backed, memory-mapped representation for scan experiments.
+ */
 class BlockStore{
     public:
         std::vector<Block> block_list_;                                 // List of block objects
@@ -91,7 +103,7 @@ class BlockStore{
         }
 
 
-        /* Create an empty block. Return its ID*/
+        /** Create an empty block and return its local identifier. */
         size_t CreateEmptyBlock(){
             block_list_.emplace_back();
             block_mbrs_.emplace_back();
@@ -99,9 +111,7 @@ class BlockStore{
             return block_list_.size()-1;
         }
 
-
-        /* Inserts point in the block indicated and returns the block size.
-        */
+        /** Insert a point into an existing block and return the new block size. */
         size_t InsertNewPointInBlock(Point& pnt, size_t local_block_id){
 
             block_mbrs_[local_block_id].UpdateBoundingBoxWithPoint(pnt);
@@ -114,9 +124,7 @@ class BlockStore{
             return block_point_counts_[local_block_id];
         }
 
-        /* Create and insert a new block from the vector iterators given.
-            Returns the id of inserted block.
-        */
+        /** Create a new block from an iterator range and return its local ID. */
         size_t InsertNewBlock(std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end){
             
             size_t curr_block_id = block_mbrs_.size();
@@ -135,7 +143,7 @@ class BlockStore{
             return curr_block_id;
         }
 
-        /* Reassign the data in the block.*/
+        /** Replace the contents of an existing block and recompute its MBR. */
         BoundingRectangle ReassignPointsInBlock(size_t local_block_id,std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end){
             block_mbrs_[local_block_id].SetToDefault();
             for(std::vector<Point>::iterator itr=it_data_begin;itr!=it_data_end;itr++)
@@ -147,16 +155,18 @@ class BlockStore{
             return block_mbrs_[local_block_id];
         }
 
-
-        /* Access points in block*/
+        /** Return a materialized copy of the points stored in one block. */
         std::vector<Point> FetchPointsInBlock(size_t local_block_id){
             std::vector<Point> result;
             block_list_[local_block_id].CopyAllPointsIntoResult(result);
             return result;
         }
-
-
-        /*From a list of blocks filter answers for a query.*/
+        /**
+         * Scan the supplied blocks and append matching points into `result_vec`.
+         *
+         * When `use_memory_mapped_data` is enabled this reads from the mmap'd
+         * flattened representation; otherwise it scans the in-memory blocks.
+         */
         void FilterPointsFromBlocksForQuery(Query &query,std::vector<size_t>& refined_blocks, std::vector<Point>& result_vec){
 
             if(use_memory_mapped_data){
@@ -173,21 +183,20 @@ class BlockStore{
                 }
         }
 
-
-
-        /* Test for block overlap with query*/
+        /** Retain only those local blocks whose MBR overlaps the query. */
         void RefinedBlocksForQueryFromLocalBlocks(Query &query, std::vector<size_t>& local_blocks,std::vector<size_t>& refined_blocks){
             for(size_t& blk_id: local_blocks)
                 if(query.IsThereOverlap(block_mbrs_[blk_id]))
                     refined_blocks.push_back(blk_id);
         }
         
-        /*Fetch bounding box*/
+        /** Return the cached MBR for one block. */
         BoundingRectangle FetchBoundingBoxForBlock(size_t local_block_id){
             return block_mbrs_[local_block_id];
         }
 
 
+        /** Sum the point counts of a list of blocks. */
         size_t NumOfPointsInBlocks(std::vector<size_t>& refined_blocks){
             size_t sum_points=0;
             for(auto &block_id: refined_blocks)
@@ -195,7 +204,7 @@ class BlockStore{
             return sum_points;
         }
 
-        /* Iterate over blocks to find sum of point-counts in blocks completely covered by query*/
+        /** Sum the counts of blocks fully covered by the query rectangle. */
         size_t NumOfPointsCopiedDirectlyForQuery(Query& query){
             size_t points_in_exact_ranges=0;
             for(size_t block_id=0;block_id<block_list_.size();block_id++)
@@ -204,17 +213,20 @@ class BlockStore{
             return points_in_exact_ranges;
         }
 
+        /** Return the number of blocks currently stored. */
         size_t NumOfBlocks(){
             return block_list_.size();
         }
 
 
+        /** Print all block sizes for debugging. */
         void PrintBlockSizes(){
             for(auto& blk:block_point_counts_)
                 std::cout<<blk<<" ";
             std::cout<<"\n";
         }
 
+        /** Return coarse block-size quantiles plus the arithmetic mean. */
         std::vector<size_t> QuantilesOfBlockSizes(){
             std::vector<size_t> temp_block_point_counts(block_point_counts_);
             std::sort(temp_block_point_counts.begin(),temp_block_point_counts.end());
@@ -235,9 +247,7 @@ class BlockStore{
             
         }
 
-
-
-        // ****** DISK BACKED STRUCTURES **********
+        /** Finalize the block store into a memory-mapped, disk-backed layout. */
         void FinishedConstruction(){
             memory_mapped_data_created = true;
             //1. open file write object.
@@ -449,7 +459,6 @@ class BlockStore{
 
 
 #endif
-
 
 
 

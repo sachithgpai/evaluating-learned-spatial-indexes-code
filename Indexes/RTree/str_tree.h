@@ -19,17 +19,23 @@
 #include"../utils/constants.h"
 
 
+/**
+ * Sort-Tile-Recursive style R-tree builder with block-based leaves.
+ */
 class STRTree: public RTreeBASE {
     public:
 
 
+        /** Create an empty STRTree shell. */
         STRTree(){}
 
+        /** Build an STRTree from an in-memory point set. */
         STRTree(std::vector<Point> data){
             root_ = BuildSTRTree(data.begin(),data.end(),0);
             block_store_.FinishedConstruction();
         }
 
+        /** Reconstruct an STRTree from the serialized format. */
         STRTree(string filename){
             root_ = new RTreeNode();
             std::ifstream fin(filename);
@@ -40,9 +46,7 @@ class STRTree: public RTreeBASE {
         }
 
 
-        /**
-         * STRTree building function. Will need to return the pointer to the current node created so that the bounding box updation is done correctly for all internal nodes.
-        */
+        /** Recursively build and return one STRTree subtree. */
         RTreeNode* BuildSTRTree(std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end,size_t sort_dim){
 
             RTreeNode* node = new RTreeNode();

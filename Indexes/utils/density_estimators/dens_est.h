@@ -67,6 +67,7 @@ class DensEstTree{
 
     
 
+    /** Recursively build one tree in the estimation forest. */
     /**
     * @brief A helper function to build the tree.
     * 
@@ -126,6 +127,7 @@ class DensEstTree{
     }
 
 
+    /** Estimate the point count that falls inside `mbr`. */
     /**
     * @brief The actual exposed function that estimates the counts of data in a given box.
     *        - It estimates the number of points returned by both the trees.
@@ -143,6 +145,7 @@ class DensEstTree{
 
     
 
+    /** Recursive helper for `EstimateCount`. */
     /**
     * @brief The recursive function that goes through the density estimation tree and calculates
     *        counts within a range query.

@@ -5,8 +5,7 @@
 #include<cstdlib>
 
 /**
- * @brief Class to hold all the node information.
- * 
+ * @brief Node used by the density-estimation trees.
  */
 class DensEstNode{
     public:
@@ -17,6 +16,7 @@ class DensEstNode{
     DensEstNode* children_[2];
     bool is_leaf_;
 
+    /** Initialize an empty leaf node. */
     DensEstNode(){
         counts_ = 0;
         children_[0]=NULL;
@@ -24,7 +24,7 @@ class DensEstNode{
         is_leaf_ = true;
     }
 
-
+    /** Recursively delete the child subtrees. */
     ~DensEstNode(){
         delete children_[0];
         delete children_[1];

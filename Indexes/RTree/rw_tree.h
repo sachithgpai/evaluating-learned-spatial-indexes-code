@@ -21,15 +21,18 @@
 #define RW_MINBRANCH (RW_BRANCH_FACTOR>>2)
 
 
-
-
-
+/**
+ * Query-weighted incremental R-tree variant that relies on a weighted density
+ * estimator during split and insertion decisions.
+ */
 class RWTree: public RTreeBASE{
     public:
         WeightedDensEstTree* weighted_datapoint_density_estimator_{};
 
+        /** Create an empty RWTree shell. */
         RWTree(){}
 
+        /** Reconstruct an RWTree from the serialized format. */
         RWTree(string filename){
             root_ = new RTreeNode();
             std::ifstream fin(filename);
@@ -38,7 +41,7 @@ class RWTree: public RTreeBASE{
             block_store_.FinishedConstruction();
         }
 
-
+        /** Build an RWTree from data and the training query workload. */
         RWTree(std::vector<Point> data, std::vector<Query> queries){
 
 
@@ -65,18 +68,12 @@ class RWTree: public RTreeBASE{
             block_store_.FinishedConstruction();
         }
 
-
+        /** Release the owned weighted density estimator. */
         ~RWTree(){
             if(weighted_datapoint_density_estimator_ != NULL )
                 delete weighted_datapoint_density_estimator_;
         }
-
-
-        
-
-        /**
-         * RWTree building function. Will need to return the pointer to the current node created so that the bounding box updation is done correctly for all internal nodes.
-        */
+        /** Bootstrap the incremental RWTree construction from the initial block. */
         void BuildRWTree(std::vector<Point>& data){
 
             root_ = new RTreeNode();
@@ -99,8 +96,7 @@ class RWTree: public RTreeBASE{
             return;
         }
 
-
-
+        /** Insert one point and maintain the incremental tree invariants. */
         void InsertPoint(Point pnt){
 
             // ChooseSubtree to find the leaf node to insert. Also get all the nodes that are accessed in the way.
@@ -177,7 +173,7 @@ class RWTree: public RTreeBASE{
 
         }
 
-        /* Function splits the internal nodes of an overflowing node into two. The function sorts the array according to best sort dim and returns the location of split*/
+        /** Split an overflowing internal node and return the split position. */
         size_t SplitNodesIntoTwo(std::vector<RTreeNode*>& temp_arr){
 
             double_t min_split_cost = std::numeric_limits<double_t>::max();
