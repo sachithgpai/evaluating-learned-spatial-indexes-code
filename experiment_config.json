@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "default_experiment": "synthetic",
+  "experiments": {
+    "synthetic": {
+      "seed": null,
+      "n_points": 100000,
+      "n_queries": 200,
+      "num_datasets": 5,
+      "num_query_scales": 5,
+      "num_query_clusters": 5,
+      "synthetic_num_clusters": 10,
+      "target_fractions": [
+        0.000064,
+        0.000256,
+        0.001024,
+        0.004096,
+        0.016384
+      ],
+      "density_grid_size": 512,
+      "exact_refine_steps": 0
+    },
+    "real": {
+      "seed": 42,
+      "n_queries": 200,
+      "num_samples": 5,
+      "num_query_scales": 5,
+      "num_query_clusters": 5,
+      "target_fractions": [
+        0.000064,
+        0.000256,
+        0.001024,
+        0.004096,
+        0.016384
+      ],
+      "density_grid_size": 512,
+      "real_target_points": 8000000,
+      "approx_low": 12000000,
+      "approx_high": 16000000,
+      "real_knn_k": 512,
+      "real_center_candidates": 2000,
+      "center_grid_size": 256,
+      "exact_refine_steps": 0,
+      "data_entropy_variants": 1
+    }
+  },
+  "evaluation": {
+    "block_sizes": [
+      32,
+      64,
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096
+    ]
+  }
+}

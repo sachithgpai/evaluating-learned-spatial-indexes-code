@@ -5,7 +5,11 @@
 #include<string>
 #include<algorithm>
 #include<cmath>
+#include<cstdlib>
 #include<filesystem>
+#include<iomanip>
+#include<sstream>
+#include<stdexcept>
 #include<thread>
 #include<random>
 
@@ -39,8 +43,84 @@ using namespace std;
 using json = nlohmann::json;   // using this to dump various logs.
 
 
-vector<size_t> BlockSizes{32, 64, 128, 256, 512, 1024, 2048, 4096};
-vector<string> selectivities_arr{"00064", "00256", "01024", "04096", "16384"};
+string configured_experiment_path() {
+    const char* env_path = getenv("EXPERIMENT_CONFIG");
+    if(env_path != nullptr && string(env_path).size() > 0) {
+        return string(env_path);
+    }
+    return (filesystem::path(PROJECT_ROOT) / "experiment_config.json").string();
+}
+
+json load_project_config() {
+    string config_path = configured_experiment_path();
+    ifstream config_file(config_path, ios::in);
+    if(!config_file.is_open()) {
+        throw runtime_error("Unable to open experiment config: " + config_path);
+    }
+
+    json project_config;
+    config_file >> project_config;
+    return project_config;
+}
+
+string configured_experiment_name(const json& project_config) {
+    const char* env_name = getenv("EXPERIMENT_NAME");
+    if(env_name != nullptr && string(env_name).size() > 0) {
+        return string(env_name);
+    }
+    if(project_config.contains("default_experiment")) {
+        return project_config.at("default_experiment").get<string>();
+    }
+    return "synthetic";
+}
+
+const json& experiment_config_for(
+    const json& project_config,
+    const string& experiment_name
+) {
+    if(
+        !project_config.contains("experiments")
+        || !project_config.at("experiments").contains(experiment_name)
+    ) {
+        throw runtime_error("Unknown experiment in config: " + experiment_name);
+    }
+    return project_config.at("experiments").at(experiment_name);
+}
+
+string fraction_to_selectivity_tag(double fraction) {
+    long long scaled = llround(fraction * 1000000.0);
+    stringstream tag;
+    tag << setw(5) << setfill('0') << scaled;
+    return tag.str();
+}
+
+vector<string> selectivity_tags_from_config(const json& experiment_config) {
+    if(
+        !experiment_config.contains("target_fractions")
+        || !experiment_config.at("target_fractions").is_array()
+        || experiment_config.at("target_fractions").empty()
+    ) {
+        throw runtime_error("Experiment config must define a non-empty target_fractions array.");
+    }
+
+    vector<string> selectivity_tags;
+    for(const auto& fraction : experiment_config.at("target_fractions")) {
+        selectivity_tags.push_back(fraction_to_selectivity_tag(fraction.get<double>()));
+    }
+    return selectivity_tags;
+}
+
+int query_entropy_variants_from_config(const json& experiment_config) {
+    if(experiment_config.contains("query_entropy_variants")) {
+        return experiment_config.at("query_entropy_variants").get<int>();
+    }
+    if(experiment_config.contains("num_query_scales")) {
+        return experiment_config.at("num_query_scales").get<int>();
+    }
+    throw runtime_error(
+        "Experiment config must define query_entropy_variants or num_query_scales."
+    );
+}
 
 template <typename T>
 void shuffle_vector(vector<T>& values) {
@@ -53,6 +133,23 @@ int main(int argc, char* argv[]){
     if(argc != 7 && argc != 8){
         cerr<<"Usage: "<<argv[0]
             <<" <dataset_name> <data_sample_num> <data_ent_id> <block_size> <query_ent_id> <selectivity_id> [result_file]"<<endl;
+        return 1;
+    }
+
+    vector<string> selectivities_arr;
+    int query_entropy_variants = 0;
+    try {
+        json project_config = load_project_config();
+        string experiment_name = configured_experiment_name(project_config);
+        const json& experiment_config =
+            experiment_config_for(project_config, experiment_name);
+        selectivities_arr = selectivity_tags_from_config(experiment_config);
+        query_entropy_variants = query_entropy_variants_from_config(experiment_config);
+        if(query_entropy_variants < 1) {
+            throw runtime_error("Configured query entropy variant count must be >= 1.");
+        }
+    } catch(const exception& error) {
+        cerr<<"Failed to load experiment config: "<<error.what()<<endl;
         return 1;
     }
 
@@ -125,9 +222,29 @@ int main(int argc, char* argv[]){
     log_json["block_size"] = BLOCK_SIZE;
     log_json["data_sample_num"] = data_sample_num;
     log_json["dataset_entropy_id"] = data_ent_id;
+    if(data_ent_id < 1 || data_ent_id > static_cast<int>(data_entropy.size())){
+        cerr<<"Invalid data_ent_id "<<data_ent_id
+            <<" for "<<data_entropy.size()<<" data entropy rows."<<endl;
+        return 1;
+    }
     log_json["dataset_entropy"] = data_entropy[data_ent_id-1];
     log_json["query_entropy_id"] = query_ent_id;
-    log_json["query_entropy"] = query_entropy[(data_ent_id-1)*5+query_ent_id-1];
+    if(query_ent_id < 1 || query_ent_id > query_entropy_variants){
+        cerr<<"Invalid query_ent_id "<<query_ent_id
+            <<" for "<<query_entropy_variants
+            <<" configured query entropy variants."<<endl;
+        return 1;
+    }
+    size_t query_entropy_index =
+        static_cast<size_t>((data_ent_id - 1) * query_entropy_variants + query_ent_id - 1);
+    if(query_entropy_index >= query_entropy.size()){
+        cerr<<"Invalid query_ent_id "<<query_ent_id
+            <<" for "<<query_entropy_variants
+            <<" configured query entropy variants and "
+            <<query_entropy.size()<<" query entropy rows."<<endl;
+        return 1;
+    }
+    log_json["query_entropy"] = query_entropy[query_entropy_index];
     log_json["selectivity"] = selectivity;
     
     std::vector<json> list_of_results;

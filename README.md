@@ -7,20 +7,20 @@ The repository holds the C++ implementation for Indexes used for experimentation
 
 
 ## Reproducing the experiments
+Experiment sizes and selectivities are configured in `experiment_config.json` at the repository root.
+The dataset generator, task-list generator, and evaluator all read this file.
+
 ### Create a synthetic dataset
 Run the following commands to create a dataset to be used for your experiments.
 
 ```
 cd Datasets
 python3 spatial_workload_generator.py synthetic \
-  --output-root <dataset_name> \
-  --n-points <data_size> \
-  --n-queries <query_size> \
-  --target-fractions 0.000064 0.000256 0.001024 0.004096 0.016384
+  --output-root <dataset_name>
 cd ..
 ```
 
-This command generates both the legacy `otherDist/*_areabased_*` and `otherDist/*_countbased_*` workloads expected by the current experiment scripts.
+This command generates both training and evaluation query workloads for the experiment scripts.
 For real-world parquet-backed datasets and OSM conversion, see `Datasets/README.md`.
 
 
@@ -28,7 +28,7 @@ For real-world parquet-backed datasets and OSM conversion, see `Datasets/README.
 Run the script to create the list of configurations to execute.
 ```
 cd Experiments
-bash create_tasklist.sh <dataset_name>
+bash create_tasklist.sh <dataset_name> [experiment_name]
 ```
 This script creates bash files `hq_tasks_evaluate` and `hq_tasks_RSMI` with list of jobs to run for generating the experimental results.
 

@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Union
 
 import numpy as np
 
@@ -22,14 +23,60 @@ except Exception:
     Rectangle = None
 
 
-LEGACY_SELECTIVITY_SCALE = 1_000_000
-LEGACY_TARGET_FRACTIONS = [
-    64 / LEGACY_SELECTIVITY_SCALE,
-    256 / LEGACY_SELECTIVITY_SCALE,
-    1024 / LEGACY_SELECTIVITY_SCALE,
-    4096 / LEGACY_SELECTIVITY_SCALE,
-    16384 / LEGACY_SELECTIVITY_SCALE,
+SELECTIVITY_SCALE = 1_000_000
+DEFAULT_TARGET_FRACTIONS = [
+    64 / SELECTIVITY_SCALE,
+    256 / SELECTIVITY_SCALE,
+    1024 / SELECTIVITY_SCALE,
+    4096 / SELECTIVITY_SCALE,
+    16384 / SELECTIVITY_SCALE,
 ]
+PROJECT_CONFIG_FILENAME = "experiment_config.json"
+
+
+def default_project_config_path() -> Path:
+    return Path(__file__).resolve().parents[1] / PROJECT_CONFIG_FILENAME
+
+
+def load_project_config(config_path: Optional[str]) -> dict[str, Any]:
+    env_config_path = os.environ.get("EXPERIMENT_CONFIG")
+    path = Path(config_path or env_config_path or default_project_config_path())
+    if not path.exists():
+        raise FileNotFoundError(f"Experiment config not found: {path}")
+
+    with open(path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+
+    if not isinstance(config, dict):
+        raise ValueError(f"Experiment config must be a JSON object: {path}")
+    return config
+
+
+def get_experiment_config(
+    project_config: dict[str, Any],
+    experiment_name: str,
+) -> dict[str, Any]:
+    experiments = project_config.get("experiments", {})
+    if not isinstance(experiments, dict):
+        raise ValueError("Experiment config field 'experiments' must be an object.")
+
+    if experiment_name not in experiments:
+        known = ", ".join(sorted(experiments))
+        raise ValueError(
+            f"Unknown experiment '{experiment_name}' in experiment config. "
+            f"Known experiments: {known}"
+        )
+
+    experiment_config = experiments[experiment_name]
+    if not isinstance(experiment_config, dict):
+        raise ValueError(
+            f"Experiment config entry '{experiment_name}' must be an object."
+        )
+    return experiment_config
+
+
+def config_value(config: dict[str, Any], config_name: str, fallback: Any) -> Any:
+    return config.get(config_name, fallback)
 
 
 @dataclass
@@ -40,7 +87,7 @@ class GeneratorConfig:
     num_query_scales: int = 5
     num_query_clusters: int = 5
     target_fractions: list[float] = field(
-        default_factory=lambda: list(LEGACY_TARGET_FRACTIONS)
+        default_factory=lambda: list(DEFAULT_TARGET_FRACTIONS)
     )
 
     # Synthetic dataset
@@ -90,12 +137,9 @@ class GeneratorConfig:
 
 
 class SpatialWorkloadGenerator:
-    """
-    Generate synthetic or real spatial workloads while preserving the legacy
-    on-disk layout expected by the existing experiment scripts.
-    """
+    """Generate synthetic or real spatial workloads for the experiment runner."""
 
-    def __init__(self, config: GeneratorConfig, output_root: str | Path):
+    def __init__(self, config: GeneratorConfig, output_root: Union[str, Path]):
         self.cfg = config
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -217,10 +261,10 @@ class SpatialWorkloadGenerator:
         plt.close(fig)
 
     def frac_to_tag(self, frac: float) -> str:
-        scaled = int(round(frac * LEGACY_SELECTIVITY_SCALE))
+        scaled = int(round(frac * SELECTIVITY_SCALE))
         if math.isclose(
             frac,
-            scaled / LEGACY_SELECTIVITY_SCALE,
+            scaled / SELECTIVITY_SCALE,
             rel_tol=0.0,
             abs_tol=1e-12,
         ):
@@ -248,7 +292,7 @@ class SpatialWorkloadGenerator:
         self,
         path: Path,
         rows: np.ndarray,
-        fmt: str | list[str],
+        fmt: Union[str, list[str]],
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savetxt(path, rows, fmt=fmt)
@@ -562,7 +606,7 @@ class SpatialWorkloadGenerator:
 
         return counts_flat.reshape(self.n_lat, self.n_lon)
 
-    def save_world_grid(self, path_npz: str | Path, grid: np.ndarray) -> None:
+    def save_world_grid(self, path_npz: Union[str, Path], grid: np.ndarray) -> None:
         np.savez_compressed(
             path_npz,
             grid=grid,
@@ -574,7 +618,7 @@ class SpatialWorkloadGenerator:
             n_lon=self.n_lon,
         )
 
-    def load_world_grid(self, path_npz: str | Path) -> np.ndarray:
+    def load_world_grid(self, path_npz: Union[str, Path]) -> np.ndarray:
         data = np.load(path_npz)
         return data["grid"]
 
@@ -1258,9 +1302,8 @@ class SpatialWorkloadGenerator:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate synthetic or real spatial workloads. "
-            "Synthetic mode replaces the old GMM and count-query generators "
-            "while preserving the legacy file layout."
+            "Generate synthetic or real spatial workloads from the shared "
+            "experiment config."
         )
     )
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -1269,26 +1312,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "synthetic",
         help="Generate synthetic datasets plus area-based and count-based queries.",
     )
-    synthetic.add_argument("--output-root", type=str, default="workload_output")
-    synthetic.add_argument("--seed", type=int, default=None)
-    synthetic.add_argument("--n-points", type=int, default=100000)
-    synthetic.add_argument("--n-queries", type=int, default=200)
-    synthetic.add_argument("--num-datasets", type=int, default=5)
-    synthetic.add_argument("--num-query-scales", type=int, default=5)
-    synthetic.add_argument("--num-query-clusters", type=int, default=5)
-    synthetic.add_argument("--synthetic-num-clusters", type=int, default=10)
     synthetic.add_argument(
-        "--target-fractions",
-        type=float,
-        nargs="+",
-        default=list(LEGACY_TARGET_FRACTIONS),
+        "--config",
+        type=str,
+        default=None,
+        help=(
+            "Path to the project experiment config JSON. Defaults to "
+            "../experiment_config.json or EXPERIMENT_CONFIG."
+        ),
     )
-    synthetic.add_argument("--density-grid-size", type=int, default=512)
-    synthetic.add_argument("--exact-refine-steps", type=int, default=0)
+    synthetic.add_argument(
+        "--experiment",
+        type=str,
+        default=None,
+        help="Experiment key inside the config. Defaults to 'synthetic'.",
+    )
+    synthetic.add_argument("--output-root", type=str, default="workload_output")
 
     real = subparsers.add_parser(
         "real",
         help="Sample real datasets from parquet and generate matching workloads.",
+    )
+    real.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=(
+            "Path to the project experiment config JSON. Defaults to "
+            "../experiment_config.json or EXPERIMENT_CONFIG."
+        ),
+    )
+    real.add_argument(
+        "--experiment",
+        type=str,
+        default=None,
+        help="Experiment key inside the config. Defaults to 'real'.",
     )
     real.add_argument("--parquet-path", type=str, required=True)
     real.add_argument("--output-root", type=str, default="workload_output")
@@ -1298,44 +1356,67 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="count_grid_0p05x0p1_deg.npz",
     )
     real.add_argument("--build-world-grid", action="store_true")
-    real.add_argument("--seed", type=int, default=42)
-    real.add_argument("--n-queries", type=int, default=200)
-    real.add_argument("--num-samples", type=int, default=5)
-    real.add_argument("--num-query-scales", type=int, default=5)
-    real.add_argument("--num-query-clusters", type=int, default=5)
-    real.add_argument(
-        "--target-fractions",
-        type=float,
-        nargs="+",
-        default=list(LEGACY_TARGET_FRACTIONS),
-    )
-    real.add_argument("--density-grid-size", type=int, default=512)
-    real.add_argument("--real-target-points", type=int, default=8000000)
-    real.add_argument("--approx-low", type=int, default=12000000)
-    real.add_argument("--approx-high", type=int, default=16000000)
-    real.add_argument("--real-knn-k", type=int, default=512)
-    real.add_argument("--real-center-candidates", type=int, default=2000)
-    real.add_argument("--center-grid-size", type=int, default=256)
-    real.add_argument("--exact-refine-steps", type=int, default=0)
 
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    project_config = load_project_config(args.config)
+    experiment_name = args.experiment or args.mode
+    experiment_config = get_experiment_config(project_config, experiment_name)
+    default_cfg = GeneratorConfig()
 
     if args.mode == "synthetic":
         config = GeneratorConfig(
-            seed=args.seed,
-            synthetic_n_points=args.n_points,
-            n_queries=args.n_queries,
-            synthetic_num_datasets=args.num_datasets,
-            synthetic_num_clusters=args.synthetic_num_clusters,
-            num_query_scales=args.num_query_scales,
-            num_query_clusters=args.num_query_clusters,
-            target_fractions=list(args.target_fractions),
-            density_grid_size=args.density_grid_size,
-            exact_refine_steps=args.exact_refine_steps,
+            seed=config_value(experiment_config, "seed", default_cfg.seed),
+            synthetic_n_points=config_value(
+                experiment_config,
+                "n_points",
+                default_cfg.synthetic_n_points,
+            ),
+            n_queries=config_value(
+                experiment_config,
+                "n_queries",
+                default_cfg.n_queries,
+            ),
+            synthetic_num_datasets=config_value(
+                experiment_config,
+                "num_datasets",
+                default_cfg.synthetic_num_datasets,
+            ),
+            synthetic_num_clusters=config_value(
+                experiment_config,
+                "synthetic_num_clusters",
+                default_cfg.synthetic_num_clusters,
+            ),
+            num_query_scales=config_value(
+                experiment_config,
+                "num_query_scales",
+                default_cfg.num_query_scales,
+            ),
+            num_query_clusters=config_value(
+                experiment_config,
+                "num_query_clusters",
+                default_cfg.num_query_clusters,
+            ),
+            target_fractions=list(
+                config_value(
+                    experiment_config,
+                    "target_fractions",
+                    default_cfg.target_fractions,
+                )
+            ),
+            density_grid_size=config_value(
+                experiment_config,
+                "density_grid_size",
+                default_cfg.density_grid_size,
+            ),
+            exact_refine_steps=config_value(
+                experiment_config,
+                "exact_refine_steps",
+                default_cfg.exact_refine_steps,
+            ),
         )
         generator = SpatialWorkloadGenerator(config, output_root=args.output_root)
         generator.run_synthetic()
@@ -1343,20 +1424,74 @@ def main() -> None:
 
     if args.mode == "real":
         config = GeneratorConfig(
-            seed=args.seed,
-            n_queries=args.n_queries,
-            real_num_samples=args.num_samples,
-            num_query_scales=args.num_query_scales,
-            num_query_clusters=args.num_query_clusters,
-            target_fractions=list(args.target_fractions),
-            density_grid_size=args.density_grid_size,
-            real_target_points=args.real_target_points,
-            approx_count_low=args.approx_low,
-            approx_count_high=args.approx_high,
-            real_knn_k=args.real_knn_k,
-            real_center_candidates=args.real_center_candidates,
-            center_grid_size=args.center_grid_size,
-            exact_refine_steps=args.exact_refine_steps,
+            seed=config_value(experiment_config, "seed", default_cfg.seed),
+            n_queries=config_value(
+                experiment_config,
+                "n_queries",
+                default_cfg.n_queries,
+            ),
+            real_num_samples=config_value(
+                experiment_config,
+                "num_samples",
+                default_cfg.real_num_samples,
+            ),
+            num_query_scales=config_value(
+                experiment_config,
+                "num_query_scales",
+                default_cfg.num_query_scales,
+            ),
+            num_query_clusters=config_value(
+                experiment_config,
+                "num_query_clusters",
+                default_cfg.num_query_clusters,
+            ),
+            target_fractions=list(
+                config_value(
+                    experiment_config,
+                    "target_fractions",
+                    default_cfg.target_fractions,
+                )
+            ),
+            density_grid_size=config_value(
+                experiment_config,
+                "density_grid_size",
+                default_cfg.density_grid_size,
+            ),
+            real_target_points=config_value(
+                experiment_config,
+                "real_target_points",
+                default_cfg.real_target_points,
+            ),
+            approx_count_low=config_value(
+                experiment_config,
+                "approx_low",
+                default_cfg.approx_count_low,
+            ),
+            approx_count_high=config_value(
+                experiment_config,
+                "approx_high",
+                default_cfg.approx_count_high,
+            ),
+            real_knn_k=config_value(
+                experiment_config,
+                "real_knn_k",
+                default_cfg.real_knn_k,
+            ),
+            real_center_candidates=config_value(
+                experiment_config,
+                "real_center_candidates",
+                default_cfg.real_center_candidates,
+            ),
+            center_grid_size=config_value(
+                experiment_config,
+                "center_grid_size",
+                default_cfg.center_grid_size,
+            ),
+            exact_refine_steps=config_value(
+                experiment_config,
+                "exact_refine_steps",
+                default_cfg.exact_refine_steps,
+            ),
         )
         generator = SpatialWorkloadGenerator(config, output_root=args.output_root)
         generator.run_real(
