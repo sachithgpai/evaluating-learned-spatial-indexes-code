@@ -10,47 +10,54 @@ The repository holds the C++ implementation for Indexes used for experimentation
 Experiment sizes and selectivities are configured in `experiment_config.json` at the repository root.
 The dataset generator, task-list generator, and evaluator all read this file.
 
-### Create a synthetic dataset
-Run the following commands to create a dataset to be used for your experiments.
+### Full Synthetic Experiment
+Run these commands from the repository root:
 
-```
+```bash
+REPO_ROOT="$(pwd)"
+DATASET_NAME="dataset_synthetic_full"
+CONFIG_PATH="${REPO_ROOT}/experiment_config.json"
+
 cd Datasets
 python3 spatial_workload_generator.py synthetic \
-  --output-root <dataset_name>
-cd ..
-```
+  --config "${CONFIG_PATH}" \
+  --output-root "${DATASET_NAME}"
 
-This command generates both training and evaluation query workloads for the experiment scripts.
-For real-world parquet-backed datasets and OSM conversion, see `Datasets/README.md`.
-
-
-### Create the list of configurations to execute
-Run the script to create the list of configurations to execute.
-```
-cd Experiments
-bash create_tasklist.sh <dataset_name> [experiment_name]
-```
-This script creates bash files `hq_tasks_evaluate` and `hq_tasks_RSMI` with list of jobs to run for generating the experimental results.
-
-
-### Experimental Evaluation.
-
-Since the number of individual jobs are very high, it is suitable to use the HyperQueue tool for this purpose. OR use any other job scheduler tool available to execute the jobs listed in the two `hq_tasks_...` files.
-
-First we need to train and store the RSMI models to use in experiments.
-```
-hq submit --each-line hq_tasks_RSMI
-```
-You can add an option `--cpus=X` to define the number of CPUs cores to use for each job.
-This will train and store the RSMI indexes for each data configuration in `Experiments/<dataset_name>/TrainedIndexes/RSMI`. These learned models will be used by the evaluation script.
-
-Then we can run the main evaluation script:
-```
+cd ../Experiments
 g++ -std=c++17 evaluate_all_indexes.cpp -o build_evaluate.out
+EXPERIMENT_CONFIG="${CONFIG_PATH}" bash create_tasklist.sh "${DATASET_NAME}" synthetic
+```
+
+This creates `hq_tasks_RSMI` and `hq_tasks_evaluate` in `Experiments/`.
+Train the RSMI models first, then run the full evaluator:
+
+```bash
+hq submit --each-line hq_tasks_RSMI
 hq submit --each-line hq_tasks_evaluate
 ```
 
-### Consodidating results and Plotting.
+You can add scheduler options such as `--cpus=X` to either `hq submit` command.
+Results are written under `Experiments/<dataset_name>/ResultsFolder_ExtendBlockSize/`.
+
+### Quick Smoke Test
+Use `small_experiment_config.json` for quick local checks:
+
+```bash
+REPO_ROOT="$(pwd)"
+DATASET_NAME="dataset_synthetic_small"
+CONFIG_PATH="${REPO_ROOT}/small_experiment_config.json"
+
+cd Datasets
+python3 spatial_workload_generator.py synthetic \
+  --config "${CONFIG_PATH}" \
+  --output-root "${DATASET_NAME}"
+
+cd ../Experiments
+g++ -std=c++17 evaluate_all_indexes.cpp -o build_evaluate.out
+EXPERIMENT_CONFIG="${CONFIG_PATH}" bash create_tasklist.sh "${DATASET_NAME}" synthetic
+```
+
+For real-world parquet-backed datasets and OSM conversion, see `Datasets/README.md`.
 
 
 

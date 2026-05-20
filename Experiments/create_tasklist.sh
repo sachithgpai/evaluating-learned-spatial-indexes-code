@@ -49,6 +49,7 @@ for ((data_ent_id = 1; data_ent_id <= num_data_entropy_variants; data_ent_id++))
                     {
                         printf '%q ' \
                             env \
+                            "PROJECT_ROOT=${repo_root}" \
                             "EXPERIMENT_CONFIG=${config_path}" \
                             "EXPERIMENT_NAME=${experiment_name}" \
                             "${evaluate_bin}" \
@@ -68,6 +69,7 @@ for ((data_ent_id = 1; data_ent_id <= num_data_entropy_variants; data_ent_id++))
             {
                 printf '%q ' \
                     env \
+                    "PROJECT_ROOT=${repo_root}" \
                     "EXPERIMENT_CONFIG=${config_path}" \
                     "EXPERIMENT_NAME=${experiment_name}" \
                     python3 \

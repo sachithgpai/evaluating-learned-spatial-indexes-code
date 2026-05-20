@@ -15,7 +15,9 @@ from time import time
 
 RSMI_SPLIT_CNT = 4                 # creates a branching factor of 16
 SAMPLING_RATIO = 0.1
-PROJECT_ROOT = Path('/scratch/project_2005865/sachithp/experiments-md-index')
+PROJECT_ROOT = Path(
+    os.environ.get("PROJECT_ROOT", Path(__file__).resolve().parents[2])
+).resolve()
 DATASET_FOLDER_NAME = ''
 RTreeStructure = []
 RTreeStructure_LR = []
