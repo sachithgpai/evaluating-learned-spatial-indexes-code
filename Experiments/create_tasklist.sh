@@ -90,7 +90,6 @@ mkdir -p "${dataset_root}/TrainedIndexes/QDTree"
 mkdir -p "${dataset_root}/TrainedIndexes/RSMI"
 mkdir -p "${dataset_root}/TrainedIndexes/FLOOD"
 mkdir -p "${dataset_root}/ResultsFolder"
-mkdir -p "${dataset_root}/ResultsFolder_ExtendBlockSize"
 
 # Several index implementations spill temporary block data under the repo root.
 mkdir -p "${repo_root}/temp_blockstore"

@@ -37,7 +37,7 @@ hq submit --each-line hq_tasks_evaluate
 ```
 
 You can add scheduler options such as `--cpus=X` to either `hq submit` command.
-Results are written under `Experiments/<dataset_name>/ResultsFolder_ExtendBlockSize/`.
+Results are written under `Experiments/<dataset_name>/ResultsFolder/`.
 
 ### Quick Smoke Test
 Use `small_experiment_config.json` for quick local checks:

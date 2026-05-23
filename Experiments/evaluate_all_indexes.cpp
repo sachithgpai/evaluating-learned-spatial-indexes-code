@@ -51,6 +51,14 @@ string configured_experiment_path() {
     return (filesystem::path(PROJECT_ROOT) / "experiment_config.json").string();
 }
 
+filesystem::path configured_output_dir(const string& dataset_folder_name) {
+    const char* env_path = getenv("EXPERIMENT_OUTPUT_DIR");
+    if(env_path != nullptr && string(env_path).size() > 0) {
+        return filesystem::path(env_path);
+    }
+    return filesystem::path(PROJECT_ROOT) / "Experiments" / dataset_folder_name / "ResultsFolder";
+}
+
 json load_project_config() {
     string config_path = configured_experiment_path();
     ifstream config_file(config_path, ios::in);
@@ -174,6 +182,10 @@ int main(int argc, char* argv[]){
             ? string(argv[7])
             : "P_"+to_string(BLOCK_SIZE)+"_D_"+to_string(data_sample_num)+"_DE_"+
                 to_string(data_ent_id)+"_Q_"+to_string(query_ent_id)+"_S_"+selectivity+".jsonl";
+    const char* env_result_file = getenv("EXPERIMENT_RESULT_FILE");
+    if(env_result_file != nullptr && string(env_result_file).size() > 0) {
+        line_num = string(env_result_file);
+    }
 
 
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" "<<PROJECT_ROOT<<"\n";
@@ -1191,8 +1203,9 @@ int main(int argc, char* argv[]){
 
 
 
-    filesystem::create_directories(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/ResultsFolder_ExtendBlockSize");
-    ofstream result_file(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/ResultsFolder_ExtendBlockSize/"+line_num,ios_base::app);
+    filesystem::path result_dir = configured_output_dir(dataset_folder_name);
+    filesystem::create_directories(result_dir);
+    ofstream result_file((result_dir / line_num).string(),ios_base::app);
     // ofstream result_file(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/Results.json",ios_base::app);
     for(auto& result_json: list_of_results)
         result_file<<result_json<<"\n";

@@ -251,7 +251,12 @@ class BlockStore{
         void FinishedConstruction(){
             memory_mapped_data_created = true;
             //1. open file write object.
-            blockstore_filename_ = "/scratch/project_2005865/sachithp/experiments-md-index/temp_blockstore/"+generate_random_alphanumeric_string(20);
+            const char* temp_blockstore_dir = std::getenv("TEMP_BLOCKSTORE_DIR");
+            std::string blockstore_dir =
+                (temp_blockstore_dir != nullptr && std::string(temp_blockstore_dir).size() > 0)
+                    ? NormalizeProjectRoot(std::string(temp_blockstore_dir))
+                    : PROJECT_ROOT + "temp_blockstore/";
+            blockstore_filename_ = blockstore_dir+generate_random_alphanumeric_string(20);
             file_write_obj_ = std::fstream(blockstore_filename_, std::ios::out | std::ios::binary);
 
             //2. write all blocks to file write object. Also keep track of block_start and block_end locations.
@@ -459,7 +464,6 @@ class BlockStore{
 
 
 #endif
-
 
 
 
