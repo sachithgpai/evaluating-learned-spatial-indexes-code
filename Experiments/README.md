@@ -26,6 +26,10 @@ It is responsible for turning a generated dataset in `Datasets/<dataset_name>/..
   It stages the dataset and trained RSMI models to `$LOCAL_SCRATCH`, runs each line of `hq_tasks_evaluate`,
   then copies `$LOCAL_SCRATCH/output/*.json` back to `Experiments/output/`.
 
+- `hq_server_farm_rsmi_jobs.sh`
+  Slurm entrypoint for training RSMI models with HyperQueue. It runs one array task per line in `hq_tasks_RSMI`
+  without using `$LOCAL_SCRATCH`.
+
 - `hq_stage_inputs.sh`, `hq_run_evaluate_task.sh`, `hq_archive_outputs.sh`
   Helper scripts used by `hq_server_farm_jobs.sh` for scratch staging, per-array-task execution, and result collection.
 
@@ -80,7 +84,7 @@ hq submit --each-line hq_tasks_evaluate
 On Slurm clusters with node-local `$LOCAL_SCRATCH`, train the RSMI models first:
 
 ```bash
-hq submit --each-line hq_tasks_RSMI
+sbatch hq_server_farm_rsmi_jobs.sh
 ```
 
 Then submit the evaluation farm:
