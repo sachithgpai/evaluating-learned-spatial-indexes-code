@@ -21,6 +21,8 @@ Notes:
 
 - `utils/json.hpp` and `utils/pgm/` are vendored dependencies and should generally be treated as external code.
 - Most index implementations share the `BlockStore` abstraction in `utils/local_model.h` for block materialization and scanning.
+- There is no separate build step for this folder in the default pipeline. `Experiments/evaluate_all_indexes.cpp` includes these headers and is compiled from `Experiments/`.
+- RSMI training is the separate Python pre-evaluation step generated in `Experiments/hq_tasks_RSMI`. QDTree and FLOOD training happen inside the evaluator.
 - Query execution typically follows the same high-level pattern:
   1. projection to candidate cells or blocks
   2. refinement using bounding metadata

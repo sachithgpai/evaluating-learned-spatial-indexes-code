@@ -1,7 +1,7 @@
 # Experiments
 
 This folder contains the experiment runner for the repository.
-It is responsible for turning a generated dataset in `Datasets/<dataset_name>/...` into:
+It turns a generated dataset in `Datasets/<dataset_name>/...` into:
 
 - task lists for batch execution
 - trained index artifacts for methods that need offline training
@@ -12,10 +12,10 @@ It is responsible for turning a generated dataset in `Datasets/<dataset_name>/..
 - `create_tasklist.sh`
   Generates `hq_tasks_evaluate` and `hq_tasks_RSMI`.
   It also creates the expected output folders under `Experiments/<dataset_name>/`.
-  It reads experiment sizes, selectivities, and block sizes from `../experiment_config.json`.
+  It reads experiment sizes, selectivities, and block sizes from `EXPERIMENT_CONFIG`, or from `../experiment_config.json` when `EXPERIMENT_CONFIG` is not set.
 
 - `read_experiment_config.py`
-  Extracts task-list loop bounds and selectivity tags from `../experiment_config.json` for `create_tasklist.sh`.
+  Extracts task-list loop bounds and selectivity tags from the selected config for `create_tasklist.sh`.
 
 - `evaluate_all_indexes.cpp`
   Loads one dataset/query workload combination and evaluates the implemented index structures on that workload.
@@ -55,13 +55,28 @@ Datasets/<dataset_name>/
 
 `spatial_workload_generator.py` in the `Datasets` folder now generates this layout.
 
-## Workflow
+## End-to-End Workflow
 
-From inside `Experiments/`:
+First generate the dataset from the repository root. For example:
 
 ```bash
+REPO_ROOT="$(pwd)"
+DATASET_NAME="dataset_synthetic_full"
+CONFIG_PATH="${REPO_ROOT}/experiment_config.json"
+EXPERIMENT_NAME="synthetic"
+
+python3 Datasets/spatial_workload_generator.py synthetic \
+  --config "${CONFIG_PATH}" \
+  --experiment "${EXPERIMENT_NAME}" \
+  --output-root "Datasets/${DATASET_NAME}"
+```
+
+Then compile the evaluator and create task lists from inside `Experiments/`:
+
+```bash
+cd "${REPO_ROOT}/Experiments"
 g++ -std=c++17 evaluate_all_indexes.cpp -o build_evaluate.out
-bash create_tasklist.sh <dataset_name> [experiment_name]
+EXPERIMENT_CONFIG="${CONFIG_PATH}" bash create_tasklist.sh "${DATASET_NAME}" "${EXPERIMENT_NAME}"
 ```
 
 This creates:
@@ -72,12 +87,23 @@ This creates:
 - `Experiments/<dataset_name>/ResultsFolder/`
 - `<repo>/temp_blockstore/`
 
-You can then submit the generated task files with HyperQueue:
+RSMI models must be trained before evaluation. The generated task files are plain shell command lists, so a smoke test can run them directly:
+
+```bash
+bash -e hq_tasks_RSMI
+bash -e hq_tasks_evaluate
+```
+
+For HyperQueue, start a server and workers in your environment, then submit the generated task files:
 
 ```bash
 hq submit --each-line hq_tasks_RSMI
+hq job wait all
 hq submit --each-line hq_tasks_evaluate
+hq job wait all
 ```
+
+Direct shell and direct HyperQueue runs write results to `Experiments/<dataset_name>/ResultsFolder/`.
 
 ## Slurm Scratch Workflow
 
@@ -90,6 +116,7 @@ sbatch hq_server_farm_rsmi_jobs.sh
 Then submit the evaluation farm:
 
 ```bash
+EXPERIMENT_CONFIG=/path/to/the/same/config.json \
 sbatch hq_server_farm_jobs.sh <dataset_name> [experiment_name]
 ```
 
@@ -100,6 +127,8 @@ node copies its JSON files back into `Experiments/output/`.
 
 The scratch workflow overrides only runtime paths. The task list itself can still be used directly with
 `hq submit --each-line hq_tasks_evaluate` when local scratch staging is not needed.
+
+Keep the same config for dataset generation, task-list generation, and Slurm evaluation. This matters for `small_experiment_config.json` and custom configs because the scratch wrapper copies the selected config to `$LOCAL_SCRATCH/experiment_config.json`.
 
 ## Evaluator CLI
 
@@ -114,7 +143,7 @@ Where:
 - `data_sample_num` selects the outer dataset folder such as `Datasets/<dataset_name>/1/`
 - `data_ent_id` selects the datapoint file inside `datapoints/`
 - `query_ent_id` selects the query entropy variant inside `queries/otherDist/`
-- `selectivity_id` maps to the order of `target_fractions` in `../experiment_config.json`
+- `selectivity_id` maps to the order of `target_fractions` in the selected experiment config
 
 If `result_file` is omitted, the evaluator now derives a unique JSONL filename automatically.
 
@@ -129,3 +158,10 @@ The generated task commands pass `EXPERIMENT_CONFIG` and `EXPERIMENT_NAME` to `e
 Set `EXPERIMENT_OUTPUT_DIR` to write evaluator result files outside the default `Experiments/<dataset_name>/ResultsFolder/`.
 Set `EXPERIMENT_RESULT_FILE` to override the optional `[result_file]` argument.
 Set `TEMP_BLOCKSTORE_DIR` to move memory-mapped temporary blockstore files away from `<repo>/temp_blockstore/`.
+
+## Output Locations
+
+- RSMI training writes `.tree` and `.time` files to `Experiments/<dataset_name>/TrainedIndexes/RSMI/`.
+- QDTree and FLOOD artifacts are created during evaluation under `Experiments/<dataset_name>/TrainedIndexes/`.
+- Direct evaluator runs write JSONL files to `Experiments/<dataset_name>/ResultsFolder/`.
+- Slurm scratch evaluation archives numbered JSON files to `Experiments/output/`.

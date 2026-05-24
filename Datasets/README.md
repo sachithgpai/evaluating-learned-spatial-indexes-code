@@ -6,22 +6,25 @@ It generates both:
 - `otherDist/*_areabased_*` query files for QDTree training
 - `otherDist/*_countbased_*` query files for evaluation
 
-Experiment sizes and selectivities are read from the project-level config at `../experiment_config.json`.
-If you change that file, the workload generator, task-list script, and evaluator read the same values.
+Experiment sizes and selectivities are read from the project-level config. By default this is `experiment_config.json` at the repository root, unless you pass `--config` or set `EXPERIMENT_CONFIG`.
+
+The generated dataset folder must live under `Datasets/<dataset_name>/` for the experiment runner.
 
 ## Synthetic workloads
 
-From inside the `Datasets` directory:
+From the repository root:
 
 ```bash
-python3 spatial_workload_generator.py synthetic \
-  --output-root dataset_synthetic
+python3 Datasets/spatial_workload_generator.py synthetic \
+  --config experiment_config.json \
+  --experiment synthetic \
+  --output-root Datasets/dataset_synthetic
 ```
 
-This writes the experiment input files under `dataset_synthetic/`:
+This writes the experiment input files under `Datasets/dataset_synthetic/`:
 
 ```text
-dataset_synthetic/
+Datasets/dataset_synthetic/
   1/
     datapoints/
       1
@@ -40,30 +43,51 @@ dataset_synthetic/
   5/
 ```
 
+For a quick smoke dataset, use the small config:
+
+```bash
+python3 Datasets/spatial_workload_generator.py synthetic \
+  --config small_experiment_config.json \
+  --experiment synthetic \
+  --output-root Datasets/dataset_synthetic_small
+```
+
 ## Real workloads from parquet
 
 If you already have a parquet with `lat` and `lon` columns:
 
 ```bash
-python3 spatial_workload_generator.py real \
+python3 Datasets/spatial_workload_generator.py real \
+  --config experiment_config.json \
+  --experiment real \
   --parquet-path planet_latlon.parquet \
   --world-grid-path count_grid_0p05x0p1_deg.npz \
-  --output-root dataset_real \
+  --output-root Datasets/dataset_real \
   --build-world-grid
 ```
 
-Each real sample is written under `dataset_real/<sample_id>/`.
+Each real sample is written under `Datasets/dataset_real/<sample_id>/`.
 
 Use `--build-world-grid` when you want to rebuild the `.npz` count grid from parquet instead of reusing an existing one.
 
-Use `--experiment <name>` to select a different experiment profile from `../experiment_config.json`, or `--config <path>` to point at another config file.
+Use `--experiment <name>` to select a different experiment profile from the config. If omitted, the generator uses `synthetic` for synthetic mode and `real` for real mode.
+
+After generation, run the experiment pipeline from `Experiments/`:
+
+```bash
+cd Experiments
+g++ -std=c++17 evaluate_all_indexes.cpp -o build_evaluate.out
+EXPERIMENT_CONFIG=../experiment_config.json bash create_tasklist.sh dataset_real real
+```
+
+Then train RSMI before running evaluation.
 
 ## Converting OSM PBF to parquet
 
 `OSM-2d-Parquet.py` creates the parquet expected by the `real` subcommand.
 
 ```bash
-python3 OSM-2d-Parquet.py \
+python3 Datasets/OSM-2d-Parquet.py \
   planet-latest.osm.pbf \
   planet_latlon.parquet \
   --keep-every 10 \
