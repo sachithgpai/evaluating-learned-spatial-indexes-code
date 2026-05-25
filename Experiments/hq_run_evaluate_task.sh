@@ -11,6 +11,8 @@ if [[ ! "${HQ_TASK_ID}" =~ ^[0-9]+$ || "${HQ_TASK_ID}" -lt 1 ]]; then
 fi
 
 task_list="${1:-${EVALUATION_TASK_LIST:-${SLURM_SUBMIT_DIR:-$(pwd)}/hq_tasks_evaluate}}"
+echo $task_list
+
 
 if [[ ! -f "${task_list}" ]]; then
     echo "Evaluation task list not found: ${task_list}" >&2

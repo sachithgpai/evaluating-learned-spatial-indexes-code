@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #SBATCH --account=project_2005865
-#SBATCH --partition=large
-#SBATCH --nodes=3
-#SBATCH --ntasks-per-node=40
+#SBATCH --partition=test
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=10
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=0
-#SBATCH --time=00:25:00
+#SBATCH --mem=4000
+#SBATCH --time=00:15:00
 #SBATCH --job-name=hq-rsmi
-#SBATCH --output=slurm-%j.out
-#SBATCH --error=slurm-%j.err
+#SBATCH --output=slurm-rsmi-%j.out
+#SBATCH --error=slurm-rsmi-%j.err
 
 set -euo pipefail
 
@@ -51,8 +51,8 @@ if [[ $# -gt 1 ]]; then
     exit 1
 fi
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-task_list="${1:-${RSMI_TASK_LIST:-${script_dir}/hq_tasks_RSMI}}"
+task_list="${1:-${RSMI_TASK_LIST:-${SLURM_SUBMIT_DIR}/hq_tasks_RSMI}}"
+echo $SLURM_SUBMIT_DIR $task_list 
 
 if [[ "${task_list}" != /* ]]; then
     task_list="$(cd "$(dirname "${task_list}")" && pwd)/$(basename "${task_list}")"
@@ -80,7 +80,7 @@ if ! HQ_BIN="$(command -v hq)"; then
 fi
 
 worker_count="${SLURM_NTASKS:-${SLURM_JOB_NUM_NODES:-1}}"
-export HQ_SERVER_DIR="${script_dir}/hq-server-rsmi/${SLURM_JOB_ID:-manual}"
+export HQ_SERVER_DIR="${SLURM_SUBMIT_DIR}/hq-server-rsmi/${SLURM_JOB_ID:-manual}"
 mkdir -p "${HQ_SERVER_DIR}"
 
 cleanup() {
@@ -114,7 +114,7 @@ echo "Submitting HyperQueue RSMI training array..."
     --stderr=none \
     --cpus=1 \
     --array=1-"${task_count}" \
-    bash "${script_dir}/hq_server_farm_rsmi_jobs.sh" --run-task "${task_list}"
+    bash "${SLURM_SUBMIT_DIR}/hq_server_farm_rsmi_jobs.sh" --run-task "${task_list}"
 
 echo "Waiting for RSMI training jobs to finish..."
 job_wait_status=0

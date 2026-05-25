@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #SBATCH --account=project_2005865
-#SBATCH --partition=large
-#SBATCH --nodes=3
-#SBATCH --ntasks-per-node=40
+#SBATCH --partition=small
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=0
+#SBATCH --mem=16000
 #SBATCH --time=00:25:00
-#SBATCH --gres=nvme:5
+#SBATCH --gres=nvme:16
 #SBATCH --job-name=hq-evaluate
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
@@ -21,11 +21,10 @@ fi
 dataset_name="$1"
 experiment_name="${2:-${EXPERIMENT_NAME:-}}"
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
-task_list="${EVALUATION_TASK_LIST:-${script_dir}/hq_tasks_evaluate}"
+repo_root="$(cd "${SLURM_SUBMIT_DIR}/.." && pwd)"
+task_list="${EVALUATION_TASK_LIST:-${SLURM_SUBMIT_DIR}/hq_tasks_evaluate}"
 config_path="${EXPERIMENT_CONFIG:-${repo_root}/experiment_config.json}"
-output_dir="${script_dir}/output"
+output_dir="${SLURM_SUBMIT_DIR}/output"
 
 if [[ ! -f "${task_list}" ]]; then
     echo "Evaluation task list not found: ${task_list}" >&2
@@ -57,7 +56,7 @@ if [[ -n "${experiment_name}" ]]; then
     export EXPERIMENT_NAME="${experiment_name}"
 fi
 export EVALUATION_TASK_LIST="${task_list}"
-export HQ_SERVER_DIR="${script_dir}/hq-server/${SLURM_JOB_ID:-manual}"
+export HQ_SERVER_DIR="${SLURM_SUBMIT_DIR}/hq-server/${SLURM_JOB_ID:-manual}"
 
 mkdir -p "${HQ_SERVER_DIR}"
 mkdir -p "${output_dir}"
@@ -89,8 +88,8 @@ echo "Waiting for workers..."
 
 echo "Staging dataset and RSMI models to LOCAL_SCRATCH on each node..."
 srun --export=ALL --overlap --nodes="${node_count}" --ntasks="${node_count}" --ntasks-per-node=1 \
-    -m arbitrary -w "${SLURM_JOB_NODELIST}" \
-    bash "${script_dir}/hq_stage_inputs.sh" "${dataset_name}"
+     -w "${SLURM_JOB_NODELIST}" \
+    bash "${SLURM_SUBMIT_DIR}/hq_stage_inputs.sh" "${dataset_name}"
 
 echo "Submitting HyperQueue evaluation array..."
 "${HQ_BIN}" submit \
@@ -98,7 +97,7 @@ echo "Submitting HyperQueue evaluation array..."
     --stderr=none \
     --cpus=1 \
     --array=1-"${task_count}" \
-    bash "${script_dir}/hq_run_evaluate_task.sh" "${task_list}"
+    bash "${SLURM_SUBMIT_DIR}/hq_run_evaluate_task.sh" "${task_list}"
 
 echo "Waiting for evaluation jobs to finish..."
 job_wait_status=0
@@ -106,8 +105,8 @@ job_wait_status=0
 
 echo "Archiving LOCAL_SCRATCH outputs into ${output_dir}..."
 srun --export=ALL --overlap --nodes="${node_count}" --ntasks="${node_count}" --ntasks-per-node=1 \
-    -m arbitrary -w "${SLURM_JOB_NODELIST}" \
-    bash "${script_dir}/hq_archive_outputs.sh" "${output_dir}"
+     -w "${SLURM_JOB_NODELIST}" \
+    bash "${SLURM_SUBMIT_DIR}/hq_archive_outputs.sh" "${output_dir}"
 
 if (( job_wait_status != 0 )); then
     echo "One or more HyperQueue jobs failed." >&2
