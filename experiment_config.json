@@ -4,8 +4,8 @@
   "experiments": {
     "synthetic": {
       "seed": null,
-      "n_points": 100000,
-      "n_queries": 200,
+      "n_points": 8000000,
+      "n_queries": 1000,
       "num_datasets": 5,
       "num_query_scales": 5,
       "num_query_clusters": 5,

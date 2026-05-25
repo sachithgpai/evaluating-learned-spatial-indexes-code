@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --account=project_2005865
-#SBATCH --partition=small
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=16
+#SBATCH --partition=large
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=16000
+#SBATCH --mem=4000
 #SBATCH --time=00:25:00
 #SBATCH --gres=nvme:16
 #SBATCH --job-name=hq-evaluate
