@@ -194,31 +194,72 @@ int main(int argc, char* argv[]){
     /*Reading the dataset and the entropy values*/
     vector<Point> datapoints;
     double_t a, b, c, d;
-    ifstream pointsfile(PROJECT_ROOT+"Datasets/"+dataset_folder_name+"/"+to_string(data_sample_num)+"/datapoints/"+to_string(data_ent_id),ios::in);
+    filesystem::path dataset_root =
+        filesystem::path(PROJECT_ROOT) / "Datasets" / dataset_folder_name / to_string(data_sample_num);
+    filesystem::path points_path =
+        dataset_root / "datapoints" / to_string(data_ent_id);
+    ifstream pointsfile(points_path,ios::in);
+    if(!pointsfile.is_open()){
+        cerr<<"Unable to open datapoints file: "<<points_path<<endl;
+        return 1;
+    }
     while (pointsfile >> a >> b)
         datapoints.push_back(Point(a,b));
     pointsfile.close();
     cout<<"Finished loading points |D|:"<<datapoints.size()<<"\n";
+    if(datapoints.empty()){
+        cerr<<"Datapoints file is empty: "<<points_path<<endl;
+        return 1;
+    }
 
     vector<double_t> data_entropy;
-    ifstream data_entropy_file(PROJECT_ROOT+"Datasets/"+dataset_folder_name+"/"+to_string(data_sample_num)+"/datapoints/entropy_values",ios::in);
+    filesystem::path data_entropy_path = dataset_root / "datapoints" / "entropy_values";
+    ifstream data_entropy_file(data_entropy_path,ios::in);
+    if(!data_entropy_file.is_open()){
+        cerr<<"Unable to open data entropy file: "<<data_entropy_path<<endl;
+        return 1;
+    }
     while (data_entropy_file >> a >> b)
         data_entropy.push_back(b);
     data_entropy_file.close();
+    if(data_entropy.empty()){
+        cerr<<"Data entropy file is empty: "<<data_entropy_path<<endl;
+        return 1;
+    }
 
     vector<Query> countbased_queries;
-    ifstream countbased_queriesfile(PROJECT_ROOT+"Datasets/"+dataset_folder_name+"/"+to_string(data_sample_num)+"/queries/otherDist/"+to_string(data_ent_id)+"_"+selectivity+"_countbased_"+to_string(query_ent_id),ios::in);
+    filesystem::path countbased_queries_path =
+        dataset_root / "queries" / "otherDist" /
+        (to_string(data_ent_id)+"_"+selectivity+"_countbased_"+to_string(query_ent_id));
+    ifstream countbased_queriesfile(countbased_queries_path,ios::in);
+    if(!countbased_queriesfile.is_open()){
+        cerr<<"Unable to open count-based query file: "<<countbased_queries_path<<endl;
+        return 1;
+    }
     while (countbased_queriesfile >> a >> b >> c >> d)
         countbased_queries.push_back(Query(Point(a,b),Point(c,d)));
     countbased_queriesfile.close();
     cout<<"Finished loading countbased_queries |Q|:"<<countbased_queries.size()<<"\n";
+    if(countbased_queries.empty()){
+        cerr<<"Count-based query file is empty: "<<countbased_queries_path<<endl;
+        return 1;
+    }
 
 
     vector<double_t> query_entropy;
-    ifstream query_entropy_file(PROJECT_ROOT+"Datasets/"+dataset_folder_name+"/"+to_string(data_sample_num)+"/queries/entropy_values",ios::in);
+    filesystem::path query_entropy_path = dataset_root / "queries" / "entropy_values";
+    ifstream query_entropy_file(query_entropy_path,ios::in);
+    if(!query_entropy_file.is_open()){
+        cerr<<"Unable to open query entropy file: "<<query_entropy_path<<endl;
+        return 1;
+    }
     while (query_entropy_file >> a >> b >>c)
         query_entropy.push_back(c);
     query_entropy_file.close();
+    if(query_entropy.empty()){
+        cerr<<"Query entropy file is empty: "<<query_entropy_path<<endl;
+        return 1;
+    }
 
 
     /* Query-agnostic indexes tree name */

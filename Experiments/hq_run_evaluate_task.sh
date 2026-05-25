@@ -11,8 +11,12 @@ if [[ ! "${HQ_TASK_ID}" =~ ^[0-9]+$ || "${HQ_TASK_ID}" -lt 1 ]]; then
 fi
 
 task_list="${1:-${EVALUATION_TASK_LIST:-${SLURM_SUBMIT_DIR:-$(pwd)}/hq_tasks_evaluate}}"
-echo $task_list
+task_log_dir="${LOCAL_SCRATCH}/logs"
+mkdir -p "${task_log_dir}"
+exec >"${task_log_dir}/${HQ_TASK_ID}.out" 2>"${task_log_dir}/${HQ_TASK_ID}.err"
 
+echo "Running HyperQueue task ${HQ_TASK_ID} on ${SLURMD_NODENAME:-$(hostname)}"
+echo "Task list: ${task_list}"
 
 if [[ ! -f "${task_list}" ]]; then
     echo "Evaluation task list not found: ${task_list}" >&2
@@ -87,6 +91,10 @@ else
         "${task_argv[@]}"
     )
 fi
+
+printf 'Command:'
+printf ' %q' "${task_argv[@]}"
+printf '\n'
 
 cd "${LOCAL_SCRATCH}"
 "${task_argv[@]}"

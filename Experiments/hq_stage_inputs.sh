@@ -59,9 +59,11 @@ mkdir -p "${LOCAL_SCRATCH}/Experiments/${dataset_name}/TrainedIndexes/FLOOD"
 mkdir -p "${LOCAL_SCRATCH}/Experiments/${dataset_name}/ResultsFolder"
 mkdir -p "${LOCAL_SCRATCH}/output"
 mkdir -p "${LOCAL_SCRATCH}/temp_blockstore"
+mkdir -p "${LOCAL_SCRATCH}/logs"
 
 find "${LOCAL_SCRATCH}/output" -maxdepth 1 -type f -name '*.json' -delete
 find "${LOCAL_SCRATCH}/temp_blockstore" -maxdepth 1 -type f -delete
+find "${LOCAL_SCRATCH}/logs" -maxdepth 1 -type f -delete
 
 copy_dir "${source_dataset}" "${LOCAL_SCRATCH}/Datasets/${dataset_name}"
 copy_dir "${source_rsmi}" "${LOCAL_SCRATCH}/Experiments/${dataset_name}/TrainedIndexes/RSMI"

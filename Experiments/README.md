@@ -25,6 +25,7 @@ It turns a generated dataset in `Datasets/<dataset_name>/...` into:
   Slurm entrypoint for running the evaluation task list as a HyperQueue array on node-local scratch.
   It stages the dataset and trained RSMI models to `$LOCAL_SCRATCH`, runs each line of `hq_tasks_evaluate`,
   then copies `$LOCAL_SCRATCH/output/*.json` back to `Experiments/output/`.
+  Per-task stdout/stderr logs are archived under `Experiments/output/logs/<slurm_job_id>/<node>/`.
 
 - `hq_server_farm_rsmi_jobs.sh`
   Slurm entrypoint for training RSMI models with HyperQueue. It runs one array task per line in `hq_tasks_RSMI`
@@ -123,12 +124,16 @@ sbatch hq_server_farm_jobs.sh <dataset_name> [experiment_name]
 The Slurm workflow copies `Datasets/<dataset_name>/`, `Experiments/<dataset_name>/TrainedIndexes/RSMI/`,
 and the experiment config to each node's `$LOCAL_SCRATCH`. HyperQueue runs one array task per line in
 `hq_tasks_evaluate`; task `N` writes to `$LOCAL_SCRATCH/output/N.json`. After all tasks complete, each
-node copies its JSON files back into `Experiments/output/`.
+node copies its JSON files back into `Experiments/output/`. Per-task logs are copied to
+`Experiments/output/logs/<slurm_job_id>/<node>/`, which is especially useful when a task fails
+before producing JSON output.
 
 The scratch workflow overrides only runtime paths. The task list itself can still be used directly with
 `hq submit --each-line hq_tasks_evaluate` when local scratch staging is not needed.
 
 Keep the same config for dataset generation, task-list generation, and Slurm evaluation. This matters for `small_experiment_config.json` and custom configs because the scratch wrapper copies the selected config to `$LOCAL_SCRATCH/experiment_config.json`.
+If `EXPERIMENT_CONFIG` is not set for `hq_server_farm_jobs.sh`, it uses the config path embedded in the first
+`hq_tasks_evaluate` command and falls back to `../experiment_config.json` only when the task list does not name one.
 
 ## Evaluator CLI
 
@@ -165,3 +170,4 @@ Set `TEMP_BLOCKSTORE_DIR` to move memory-mapped temporary blockstore files away 
 - QDTree and FLOOD artifacts are created during evaluation under `Experiments/<dataset_name>/TrainedIndexes/`.
 - Direct evaluator runs write JSONL files to `Experiments/<dataset_name>/ResultsFolder/`.
 - Slurm scratch evaluation archives numbered JSON files to `Experiments/output/`.
+- Slurm scratch task logs are archived to `Experiments/output/logs/<slurm_job_id>/<node>/`.

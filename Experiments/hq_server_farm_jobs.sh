@@ -23,13 +23,42 @@ experiment_name="${2:-${EXPERIMENT_NAME:-}}"
 
 repo_root="$(cd "${SLURM_SUBMIT_DIR}/.." && pwd)"
 task_list="${EVALUATION_TASK_LIST:-${SLURM_SUBMIT_DIR}/hq_tasks_evaluate}"
-config_path="${EXPERIMENT_CONFIG:-${repo_root}/experiment_config.json}"
 output_dir="${SLURM_SUBMIT_DIR}/output"
+
+task_config_path() {
+    local first_task="$1"
+    local -a task_argv
+
+    eval "task_argv=(${first_task})"
+    if [[ "${task_argv[0]:-}" != "env" ]]; then
+        return 1
+    fi
+
+    for ((arg_index = 1; arg_index < ${#task_argv[@]}; arg_index++)); do
+        if [[ "${task_argv[arg_index]}" != *=* ]]; then
+            break
+        fi
+        if [[ "${task_argv[arg_index]}" == EXPERIMENT_CONFIG=* ]]; then
+            printf '%s\n' "${task_argv[arg_index]#EXPERIMENT_CONFIG=}"
+            return 0
+        fi
+    done
+
+    return 1
+}
 
 if [[ ! -f "${task_list}" ]]; then
     echo "Evaluation task list not found: ${task_list}" >&2
     echo "Run: bash create_tasklist.sh ${dataset_name}${experiment_name:+ ${experiment_name}}" >&2
     exit 1
+fi
+
+if [[ -n "${EXPERIMENT_CONFIG:-}" ]]; then
+    config_path="${EXPERIMENT_CONFIG}"
+else
+    first_task="$(sed -n '1p' "${task_list}")"
+    config_path="$(task_config_path "${first_task}" || true)"
+    config_path="${config_path:-${repo_root}/experiment_config.json}"
 fi
 
 if [[ ! -f "${config_path}" ]]; then
@@ -71,6 +100,7 @@ echo "Using HyperQueue binary: ${HQ_BIN}"
 echo "Running on nodes: ${SLURM_JOB_NODELIST:-unknown}"
 echo "SLURM_NTASKS: ${SLURM_NTASKS:-unknown}"
 echo "SLURM_CPUS_PER_TASK: ${SLURM_CPUS_PER_TASK:-1}"
+echo "Experiment config: ${config_path}"
 echo "Evaluation tasks: ${task_count}"
 
 echo "Starting HyperQueue server..."
