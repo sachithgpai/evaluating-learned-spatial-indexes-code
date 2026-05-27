@@ -8,6 +8,7 @@
 #include<chrono>
 #include<limits>
 #include<random>
+#include<cmath>
 #include"flood.h"
 
 
@@ -21,9 +22,24 @@ std::pair<std::array<int,Constants::DIM>, std::array<int,Constants::DIM>> FloodT
     double_t best_time =  std::numeric_limits<double_t>::max();
     std::array<int, 2> best_dim_ord;
     std::array<int, 2> best_split_per_dim;
+
+    // Keep sampled grids near the requested page budget so BLOCK_SIZE affects
+    // FLOOD's average cell/block occupancy.
+    int target_cells = std::max(1, int(std::ceil(double(datapoints.size())/std::max<size_t>(1,BLOCK_SIZE))));
+    int min_cells = std::max(1, target_cells/2);
+    int max_cells = std::max(min_cells, target_cells*2);
+    int max_splits_per_dim = std::max(1, int(datapoints.size()));
+
     while(since_last_improvement<25 && max_samples>0){
-        int l = 2 + std::rand()%2000;  
-        int m = 2 + std::rand()%2000;
+        int sampled_cells = min_cells + std::rand()%(max_cells-min_cells+1);
+
+        // Randomize aspect ratio while keeping the total number of cells close
+        // to sampled_cells.
+        double_t aspect = std::pow(2.0, (std::rand()/double(RAND_MAX))*4.0 - 2.0);
+        int l = std::max(1, int(std::round(std::sqrt(sampled_cells*aspect))));
+        int m = std::max(1, int(std::round(double(sampled_cells)/l)));
+        l = std::min(l,max_splits_per_dim);
+        m = std::min(m,max_splits_per_dim);
         int n = std::rand()%2;
         std::array<int, 2> dim_ord{{n, (n+1)%2}};
         std::array<int, 2> split_per_dim{{l,m}};
