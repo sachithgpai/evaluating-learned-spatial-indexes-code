@@ -88,14 +88,21 @@ class WeightedDensEstTree{
             return;
         
 
-        node->is_leaf_ = false;
-
-        
-        node->split_location_ = node->counts_/2.0;
+        double_t weighted_split_location = node->counts_/2.0;
 
         /* Custom comparator function to find the first position in the vector<Point> with split_dim element greater than split_location */
         auto bs_comp = [node](WrappedPoint& pt1_iter,double_t split_location) { return pt1_iter.temp_cum_num_queries_overlapping_< split_location; };
-        auto split_iter = std::lower_bound (data_begin, data_end, node->split_location_,bs_comp);
+        auto split_iter = std::lower_bound (data_begin, data_end, weighted_split_location,bs_comp);
+
+        if(split_iter==data_begin || split_iter==data_end)
+            return;
+
+        node->split_location_ = split_iter->elements_[node->split_dim_];
+
+        if(node->split_location_<=mbr.low_.elements_[node->split_dim_] || node->split_location_>=mbr.high_.elements_[node->split_dim_])
+            return;
+
+        node->is_leaf_ = false;
 
         BoundingRectangle child0_mbr = mbr, child1_mbr = mbr;
         child0_mbr.high_.elements_[node->split_dim_] = node->split_location_;
