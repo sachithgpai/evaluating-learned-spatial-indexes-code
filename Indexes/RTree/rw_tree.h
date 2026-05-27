@@ -348,8 +348,11 @@ class RWTree: public RTreeBASE{
                 child_id++;
             }
 
-            //sort by delta cost and then by cost
-            auto nspi_comp = [](const NodeStatsPointInsert& ns1,const NodeStatsPointInsert& ns2) { return std::tie(ns1.delta_cost_, ns1.cost_) < std::tie(ns2.delta_cost_, ns2.cost_);};
+            // Sort by workload cost first, then cheap geometric tie-breakers.
+            auto nspi_comp = [](const NodeStatsPointInsert& ns1,const NodeStatsPointInsert& ns2) {
+                return std::tie(ns1.delta_cost_, ns1.cost_, ns1.delta_volume_, ns1.volume_) <
+                       std::tie(ns2.delta_cost_, ns2.cost_, ns2.delta_volume_, ns2.volume_);
+            };
             std::sort(children_stats.begin(),children_stats.end(),nspi_comp);
 
             //IF you find nodes that covers the point to be inserted then pick the one with smallest volume (already achieved by nspi_comp)
