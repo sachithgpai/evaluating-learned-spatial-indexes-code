@@ -110,8 +110,14 @@ class BoundingRectangle{
     /** Compute the overlap area between two rectangles. */
     double_t AreaOfOverlap(const BoundingRectangle& other_mbr){
         double_t area_of_overlap = 1.0;
-        for(int i=0;i<Constants::DIM;i++)
-            area_of_overlap *= std::min(high_.elements_[i],other_mbr.high_.elements_[i]) - std::max(low_.elements_[i],other_mbr.low_.elements_[i]);
+        for(int i=0;i<Constants::DIM;i++){
+            double_t overlap =
+                std::min(high_.elements_[i],other_mbr.high_.elements_[i]) -
+                std::max(low_.elements_[i],other_mbr.low_.elements_[i]);
+            if(overlap<=0.0)
+                return 0.0;
+            area_of_overlap *= overlap;
+        }
         return area_of_overlap;
     }
 
