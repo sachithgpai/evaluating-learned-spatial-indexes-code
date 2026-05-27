@@ -8,26 +8,24 @@
 #include<iterator>
 #include<string>
 #include<array>
-#include<random>
 
 #include"../utils/local_model.h"
 #include"../utils/query.h"
 #include"rtree_node.h"
 #include"rtree_base.h"
 #include"../utils/sort_tools.h"
-#include"../utils/density_estimators/weighted_dens_est.h"
 
 
 #define RW_MINBRANCH (RW_BRANCH_FACTOR>>2)
 
 
 /**
- * Query-weighted incremental R-tree variant that relies on a weighted density
- * estimator during split and insertion decisions.
+ * Query-weighted incremental R-tree variant that uses the training workload
+ * directly as a page-scan cost oracle during split and insertion decisions.
  */
 class RWTree: public RTreeBASE{
     public:
-        WeightedDensEstTree* weighted_datapoint_density_estimator_{};
+        std::vector<Query> training_queries_;
 
         /** Create an empty RWTree shell. */
         RWTree(){}
@@ -44,35 +42,20 @@ class RWTree: public RTreeBASE{
         /** Build an RWTree from data and the training query workload. */
         RWTree(std::vector<Point> data, std::vector<Query> queries){
 
-
-            BoundingRectangle mbr;
-            for(auto &pnt:data) mbr.UpdateBoundingBoxWithPoint(pnt);
-
-            std::random_device rd;  // Will be used to obtain a seed for the random number engine
-            std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
-            std::uniform_real_distribution<> uni_dist(0.0, 1.0);
-            std::vector<Point> uniform_data;
-
-            for(int i=0;i<data.size();i++) uniform_data.emplace_back(uni_dist(gen),uni_dist(gen));
-            std::vector<WrappedPoint> wrapped_uniform_data = WeightPointsWithQuery(uniform_data,queries);
-
-            double_t total_weight_from_queries=0;
-            for(auto &uni_pnt:wrapped_uniform_data) total_weight_from_queries+= uni_pnt.num_queries_overlapping_;
-            std::cout<<"RWTree::WeightPointsWithQuery::total_weight_from_queries:"<<total_weight_from_queries<<"\n";
-
-
-            weighted_datapoint_density_estimator_ = new WeightedDensEstTree(wrapped_uniform_data,queries,total_weight_from_queries/10,mbr);
-            std::cout<<"RWTree::WeightPointsWithQuery:: FINISHED CONSTRUCTING WeightedDensEstTree"<<"\n";
-
+            training_queries_ = std::move(queries);
             BuildRWTree(data);
             block_store_.FinishedConstruction();
         }
 
-        /** Release the owned weighted density estimator. */
-        ~RWTree(){
-            if(weighted_datapoint_density_estimator_ != NULL )
-                delete weighted_datapoint_density_estimator_;
+        /** Estimate page-scan cost as the number of training queries intersecting `mbr`. */
+        double_t EstimateScanCost(const BoundingRectangle& mbr){
+            double_t cost = 0.0;
+            for(auto& query: training_queries_)
+                if(query.IsThereOverlap(mbr))
+                    cost += 1.0;
+            return cost;
         }
+
         /** Bootstrap the incremental RWTree construction from the initial block. */
         void BuildRWTree(std::vector<Point>& data){
 
@@ -197,7 +180,7 @@ class RWTree: public RTreeBASE{
 
                 for(int i=RW_MINBRANCH-1;i<temp_arr.size()-RW_MINBRANCH;i++){
                     temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-                    perimeters[i-(RW_MINBRANCH-1)]+=weighted_datapoint_density_estimator_->EstimateCount(temp_mbr);
+                    perimeters[i-(RW_MINBRANCH-1)]+=EstimateScanCost(temp_mbr);
                 }
 
                 temp_mbr.SetToDefault();
@@ -207,7 +190,7 @@ class RWTree: public RTreeBASE{
 
                 for(int i=temp_arr.size()-RW_MINBRANCH;i>=RW_MINBRANCH;i--){
                     temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-                    perimeters[i-RW_MINBRANCH]+=weighted_datapoint_density_estimator_->EstimateCount(temp_mbr);
+                    perimeters[i-RW_MINBRANCH]+=EstimateScanCost(temp_mbr);
                     if(perimeters[i-RW_MINBRANCH]<min_split_cost){
                         sort_dim=ord;
                         argmin_split_cost=i;
@@ -220,6 +203,7 @@ class RWTree: public RTreeBASE{
                 auto sort_nodes_high = [ord](const RTreeNode* n1,const RTreeNode* n2) { return n1->mbr_.high_.elements_[ord]<n2->mbr_.high_.elements_[ord];};
                 perimeters.clear();
                 perimeters.resize(temp_arr.size()-2*RW_MINBRANCH+1,0.0);
+                temp_mbr.SetToDefault();
                 std::sort(temp_arr.begin(), temp_arr.end(), sort_nodes_high);
                 
                 for(int i=0;i<RW_MINBRANCH-1;i++)
@@ -227,7 +211,7 @@ class RWTree: public RTreeBASE{
 
                 for(int i=RW_MINBRANCH-1;i<temp_arr.size()-RW_MINBRANCH;i++){
                     temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-                    perimeters[i-(RW_MINBRANCH-1)]+=weighted_datapoint_density_estimator_->EstimateCount(temp_mbr);
+                    perimeters[i-(RW_MINBRANCH-1)]+=EstimateScanCost(temp_mbr);
                 }
 
                 temp_mbr.SetToDefault();
@@ -237,7 +221,7 @@ class RWTree: public RTreeBASE{
 
                 for(int i=temp_arr.size()-RW_MINBRANCH;i>=RW_MINBRANCH;i--){
                     temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-                    perimeters[i-RW_MINBRANCH]+=weighted_datapoint_density_estimator_->EstimateCount(temp_mbr);
+                    perimeters[i-RW_MINBRANCH]+=EstimateScanCost(temp_mbr);
                     if(perimeters[i-RW_MINBRANCH]<min_split_cost){
                         sort_dim=ord;
                         argmin_split_cost=i;
@@ -286,7 +270,7 @@ class RWTree: public RTreeBASE{
 
             for(int i=MINFILL-1;i<temp_arr.size()-MINFILL;i++){
                 temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-                costs_at_split[i-(MINFILL-1)]+=weighted_datapoint_density_estimator_->EstimateCount(temp_mbr);
+                costs_at_split[i-(MINFILL-1)]+=EstimateScanCost(temp_mbr);
             }
 
 
@@ -296,7 +280,7 @@ class RWTree: public RTreeBASE{
 
             for(int i=temp_arr.size()-MINFILL;i>=MINFILL;i--){
                 temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-                costs_at_split[i-MINFILL]+=weighted_datapoint_density_estimator_->EstimateCount(temp_mbr);
+                costs_at_split[i-MINFILL]+=EstimateScanCost(temp_mbr);
                 if(costs_at_split[i-MINFILL]<min_split_cost){
                     sort_dim=SortX;
                     argmin_split_cost=i;
@@ -314,7 +298,7 @@ class RWTree: public RTreeBASE{
 
             for(int i=MINFILL-1;i<temp_arr.size()-MINFILL;i++){
                 temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-                costs_at_split[i-(MINFILL-1)]+=weighted_datapoint_density_estimator_->EstimateCount(temp_mbr);
+                costs_at_split[i-(MINFILL-1)]+=EstimateScanCost(temp_mbr);
             }
 
 
@@ -324,7 +308,7 @@ class RWTree: public RTreeBASE{
 
             for(int i=temp_arr.size()-MINFILL;i>=MINFILL;i--){
                 temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-                costs_at_split[i-MINFILL]+=weighted_datapoint_density_estimator_->EstimateCount(temp_mbr);
+                costs_at_split[i-MINFILL]+=EstimateScanCost(temp_mbr);
                 if(costs_at_split[i-MINFILL]<min_split_cost){
                     sort_dim=SortY;
                     argmin_split_cost=i;
@@ -358,7 +342,9 @@ class RWTree: public RTreeBASE{
             for(auto& child_ptr: node->children_){
                 expanded_mbr = child_ptr->mbr_; 
                 expanded_mbr.UpdateBoundingBoxWithPoint(insert_pnt);
-                children_stats.emplace_back(child_id,child_ptr->mbr_,insert_pnt,weighted_datapoint_density_estimator_);
+                children_stats.emplace_back(child_id,child_ptr->mbr_,insert_pnt);
+                children_stats.back().cost_ = EstimateScanCost(child_ptr->mbr_);
+                children_stats.back().delta_cost_ = EstimateScanCost(expanded_mbr)-children_stats.back().cost_;
                 child_id++;
             }
 
