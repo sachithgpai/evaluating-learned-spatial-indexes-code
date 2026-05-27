@@ -1,12 +1,14 @@
+
 REPO_ROOT="$(pwd)"
-DATASET_NAME="dataset_synthetic_small"
-CONFIG_PATH="${REPO_ROOT}/small_experiment_config.json"
+DATASET_NAME="dataset_synthetic"
+CONFIG_PATH="${REPO_ROOT}/experiment_config.json"
+EXPERIMENT_NAME="synthetic"
 
-cd Datasets
-python3 spatial_workload_generator.py synthetic \
+python3 Datasets/spatial_workload_generator.py synthetic \
   --config "${CONFIG_PATH}" \
-  --output-root "${DATASET_NAME}"
+  --experiment "${EXPERIMENT_NAME}" \
+  --output-root "Datasets/${DATASET_NAME}"
 
-cd ../Experiments
+cd "${REPO_ROOT}/Experiments"
 g++ -std=c++17 evaluate_all_indexes.cpp -o build_evaluate.out
-EXPERIMENT_CONFIG="${CONFIG_PATH}" bash create_tasklist.sh "${DATASET_NAME}" synthetic
+EXPERIMENT_CONFIG="${CONFIG_PATH}" bash create_tasklist.sh "${DATASET_NAME}" "${EXPERIMENT_NAME}"
