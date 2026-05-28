@@ -11,6 +11,7 @@
 
 #include"../utils/local_model.h"
 #include"../utils/query.h"
+#include"../utils/density_estimators/query_dens_est.h"
 #include"rtree_node.h"
 #include"rtree_base.h"
 #include"../utils/sort_tools.h"
@@ -20,12 +21,14 @@
 
 
 /**
- * Query-weighted incremental R-tree variant that uses the training workload
- * directly as a page-scan cost oracle during split and insertion decisions.
+ * Query-weighted incremental R-tree variant that estimates training-workload
+ * page-scan cost during split and insertion decisions.
  */
 class RWTree: public RTreeBASE{
     public:
         std::vector<Query> training_queries_;
+        QueryDensEstTree* query_scan_cost_estimator_{NULL};
+        size_t query_scan_cost_estimator_granularity_{1};
 
         /** Create an empty RWTree shell. */
         RWTree(){}
@@ -42,13 +45,43 @@ class RWTree: public RTreeBASE{
         /** Build an RWTree from data and the training query workload. */
         RWTree(std::vector<Point> data, std::vector<Query> queries){
 
-            training_queries_ = std::move(queries);
+            BuildQueryScanCostEstimator(std::move(queries));
             BuildRWTree(data);
             block_store_.FinishedConstruction();
         }
 
+        /** Release the query-density estimator owned by this RWTree. */
+        ~RWTree(){
+            delete query_scan_cost_estimator_;
+        }
+
+        /** Build the 4D query-endpoint density estimator used by the RW cost oracle. */
+        void BuildQueryScanCostEstimator(std::vector<Query> queries){
+            if(queries.empty())
+                return;
+
+            BoundingRectangle query_endpoint_mbr(queries[0].low_, queries[0].low_);
+            for(auto& query: queries){
+                query_endpoint_mbr.UpdateBoundingBoxWithPoint(query.low_);
+                query_endpoint_mbr.UpdateBoundingBoxWithPoint(query.high_);
+            }
+
+            for(size_t dim=0;dim<Constants::DIM;dim++){
+                double_t span = query_endpoint_mbr.high_.elements_[dim] - query_endpoint_mbr.low_.elements_[dim];
+                double_t padding = std::max(Constants::EPSILON_ERR, span*Constants::EPSILON_ERR);
+                query_endpoint_mbr.low_.elements_[dim] -= padding;
+                query_endpoint_mbr.high_.elements_[dim] += padding;
+            }
+
+            delete query_scan_cost_estimator_;
+            query_scan_cost_estimator_ = new QueryDensEstTree(std::move(queries), query_scan_cost_estimator_granularity_, query_endpoint_mbr);
+        }
+
         /** Estimate page-scan cost as the number of training queries intersecting `mbr`. */
         double_t EstimateScanCost(const BoundingRectangle& mbr){
+            if(query_scan_cost_estimator_!=NULL)
+                return query_scan_cost_estimator_->EstimateOverlapCount(mbr);
+
             double_t cost = 0.0;
             for(auto& query: training_queries_)
                 if(query.IsThereOverlap(mbr))

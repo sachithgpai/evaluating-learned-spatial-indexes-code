@@ -26,7 +26,7 @@
 #include"../query.h"
 
 
-#define QUERY_NUM_TREES_IN_FOREST 10
+#define QUERY_NUM_TREES_IN_FOREST 1
 
 
 class HyperRectangle{
@@ -91,17 +91,27 @@ class HyperRectangle{
 
     double_t Area(){
         double_t result = 1;
-        for(size_t i =0;i<4;i++)
-            result *= (high_hyperpoint_[i]-low_hyperpoint_[i]);
+        for(size_t i =0;i<4;i++){
+            double_t width = high_hyperpoint_[i]-low_hyperpoint_[i];
+            if(width<=0.0)
+                return 0.0;
+            result *= width;
+        }
         return result;
     }
 
     /* Calculates the ration of overlap between two mbrs*/
     double_t RatioOfOverlap(const HyperRectangle& other_hymbr){
         double_t area_of_node = Area();
+        if(area_of_node<=0.0)
+            return 0.0;
         double_t area_of_overlap = 1.0;
-        for(int i=0;i<4;i++)
-            area_of_overlap *= std::min(high_hyperpoint_[i],other_hymbr.high_hyperpoint_[i]) - std::max(low_hyperpoint_[i],other_hymbr.low_hyperpoint_[i]) ;
+        for(int i=0;i<4;i++){
+            double_t overlap = std::min(high_hyperpoint_[i],other_hymbr.high_hyperpoint_[i]) - std::max(low_hyperpoint_[i],other_hymbr.low_hyperpoint_[i]);
+            if(overlap<=0.0)
+                return 0.0;
+            area_of_overlap *= overlap;
+        }
         return area_of_overlap/area_of_node;
     }
 
@@ -138,6 +148,7 @@ class QueryDensEstNode{
     size_t split_dim_;
     double_t split_location_;
     QueryDensEstNode* children_[2];
+    std::vector<Query> leaf_queries_;
     bool is_leaf_;
 
     QueryDensEstNode(){
@@ -162,7 +173,7 @@ class QueryDensEstTree{
     BoundingRectangle global_mbr_;
     
     /* Given the query and the amount of granularity, partition the tree until you reach that granularity. */
-    QueryDensEstTree(std::vector<Query> queries, size_t granularity, BoundingRectangle& global_mbr){ 
+    QueryDensEstTree(std::vector<Query> queries, size_t granularity, const BoundingRectangle& global_mbr){
 
         granularity_ = granularity;
         global_mbr_ = global_mbr;
@@ -170,12 +181,34 @@ class QueryDensEstTree{
         HyperRectangle hymbr(global_mbr);
 
         for(int i=0;i<QUERY_NUM_TREES_IN_FOREST;i++)
+            tree_list_[i] = NULL;
+
+        for(int i=0;i<QUERY_NUM_TREES_IN_FOREST;i++)
         {   
-            std::cout<<"\t Building the "<<i+1<<"th QueryDensEstTree"<<"\n";
             tree_list_[i] = new QueryDensEstNode();
             BuildTree(tree_list_[i],queries.begin(),queries.end(), hymbr);
-            // std::cin.get();
         }
+    }
+
+    QueryDensEstTree(const QueryDensEstTree&) = delete;
+    QueryDensEstTree& operator=(const QueryDensEstTree&) = delete;
+
+    ~QueryDensEstTree(){
+        for(int i=0;i<QUERY_NUM_TREES_IN_FOREST;i++)
+            DeleteTree(tree_list_[i]);
+    }
+
+    void DeleteTree(QueryDensEstNode* node){
+        if(node==NULL)
+            return;
+        DeleteTree(node->children_[0]);
+        DeleteTree(node->children_[1]);
+        delete node;
+    }
+
+    void StoreLeafQueries(QueryDensEstNode* node, std::vector<Query>::iterator queries_begin, std::vector<Query>::iterator queries_end){
+        node->is_leaf_ = true;
+        node->leaf_queries_.assign(queries_begin, queries_end);
     }
 
 
@@ -190,39 +223,58 @@ class QueryDensEstTree{
     void BuildTree(QueryDensEstNode* node, std::vector<Query>::iterator queries_begin, std::vector<Query>::iterator queries_end, HyperRectangle& hymbr){
 
 
-        node->split_dim_ = rand()%4;
-        node->counts_ = std::distance(queries_begin,queries_end);
+        const auto query_count = std::distance(queries_begin,queries_end);
+        node->counts_ = query_count;
         node->hy_mbr_ = hymbr;
 
         // std::cout<<deb<<" Count:"<<node->counts_<<"  Split Dim:"<<node->split_dim_<<"  "; 
         // hymbr.Print();
         // std::cin.get();
 
-        if(std::distance(queries_begin,queries_end)<=granularity_)
+        if(query_count<=static_cast<decltype(query_count)>(granularity_) || query_count<2){
+            StoreLeafQueries(node, queries_begin, queries_end);
             return;
+        }
+
+        auto split_iter = queries_begin;
+        bool found_split = false;
+        size_t first_split_dim = 0;
+        for(size_t split_dim_offset=0;split_dim_offset<4;split_dim_offset++){
+            node->split_dim_ = (first_split_dim+split_dim_offset)%4;
+            std::sort(queries_begin,queries_end,BoundingRectSortOrderer(node->split_dim_));
+
+            auto endpoint_value = [node](const Query& query) {
+                return (node->split_dim_<2) ?
+                    query.low_.elements_[node->split_dim_] :
+                    query.high_.elements_[node->split_dim_-2];
+            };
+
+            auto mid_iter = queries_begin + (query_count/2);
+            double_t lower_mid_value = endpoint_value(*(mid_iter-1));
+            double_t upper_mid_value = endpoint_value(*mid_iter);
+            if(upper_mid_value<=lower_mid_value)
+                continue;
+
+            node->split_location_ = (lower_mid_value+upper_mid_value)/2.0;
+
+            /* Custom comparator function to find the first position in the vector<Query> with split_dim element greater than split_location */
+            auto bs_comp = [node](BoundingRectangle& pt1_iter,double_t split_location) {
+                return  (node->split_dim_<2) ? (pt1_iter.low_.elements_[node->split_dim_]< split_location) : (pt1_iter.high_.elements_[node->split_dim_-2] < split_location); };
+
+            split_iter = std::lower_bound (queries_begin, queries_end, node->split_location_,bs_comp);
+            if(split_iter==queries_begin || split_iter==queries_end)
+                continue;
+
+            found_split = true;
+            break;
+        }
+
+        if(!found_split){
+            StoreLeafQueries(node, queries_begin, queries_end);
+            return;
+        }
 
         node->is_leaf_ = false;
-
-        std::sort(queries_begin,queries_end,BoundingRectSortOrderer(node->split_dim_));  
-        // for(auto i=0;i<20;i++) {
-        //     cout<<" ### ";
-        //     (*(queries_begin+i)).low_.Print();
-        //     (*(queries_begin+i)).high_.Print();
-        // }
-
-        // node->split_location_ = ( node->hy_mbr_.low_hyperpoint_[node->split_dim_] + node->hy_mbr_.high_hyperpoint_[node->split_dim_] )/2.0;
-
-
-        if(node->split_dim_<2)
-            node->split_location_ = (*(queries_begin+(node->counts_/2))).low_.elements_[node->split_dim_];
-        else
-            node->split_location_ = (*(queries_begin+(node->counts_/2))).high_.elements_[node->split_dim_-2];
-
-        /* Custom comparator function to find the first position in the vector<Query> with split_dim element greater than split_location */
-        auto bs_comp = [node](BoundingRectangle& pt1_iter,double_t split_location) { 
-            return  (node->split_dim_<2) ? (pt1_iter.low_.elements_[node->split_dim_]< split_location) : (pt1_iter.high_.elements_[node->split_dim_-2] < split_location); };
-
-        auto split_iter = std::lower_bound (queries_begin, queries_end, node->split_location_,bs_comp);
 
         HyperRectangle child0_hymbr(node->hy_mbr_);
         HyperRectangle child1_hymbr(node->hy_mbr_);
@@ -286,6 +338,42 @@ class QueryDensEstTree{
         return result/QUERY_NUM_TREES_IN_FOREST;
     }
 
+    bool CheckQueryEndpointWithinHyperRectangle(const Query& query, const HyperRectangle& query_hymbr){
+        bool result = true;
+        result &= (query.low_.elements_[0] >= query_hymbr.low_hyperpoint_[0] && query.low_.elements_[0] < query_hymbr.high_hyperpoint_[0]);
+        result &= (query.low_.elements_[1] >= query_hymbr.low_hyperpoint_[1] && query.low_.elements_[1] < query_hymbr.high_hyperpoint_[1]);
+        result &= (query.high_.elements_[0] >= query_hymbr.low_hyperpoint_[2] && query.high_.elements_[0] < query_hymbr.high_hyperpoint_[2]);
+        result &= (query.high_.elements_[1] >= query_hymbr.low_hyperpoint_[3] && query.high_.elements_[1] < query_hymbr.high_hyperpoint_[3]);
+        return result;
+    }
+
+    double_t ExactLeafCount(QueryDensEstNode* node, HyperRectangle& query_hymbr){
+        double_t result = 0.0;
+        for(auto& query: node->leaf_queries_)
+            if(CheckQueryEndpointWithinHyperRectangle(query, query_hymbr))
+                result += 1.0;
+        return result;
+    }
+
+    double_t ExactLeafOverlapCount(QueryDensEstNode* node, const BoundingRectangle& local_mbr){
+        double_t result = 0.0;
+        for(auto& query: node->leaf_queries_)
+            if(query.IsThereOverlap(local_mbr))
+                result += 1.0;
+        return result;
+    }
+
+    bool IsCompletelyCoveredByOverlapRange(const HyperRectangle& node_hymbr, const HyperRectangle& query_hymbr){
+        bool result = true;
+        for(size_t i=0;i<4;i++)
+            result &= (query_hymbr.low_hyperpoint_[i]<=node_hymbr.low_hyperpoint_[i]) &&
+                      (query_hymbr.high_hyperpoint_[i]>node_hymbr.high_hyperpoint_[i]);
+
+        result &= query_hymbr.low_hyperpoint_[2] < node_hymbr.low_hyperpoint_[2];
+        result &= query_hymbr.low_hyperpoint_[3] < node_hymbr.low_hyperpoint_[3];
+        return result;
+    }
+
 
 
 
@@ -307,12 +395,8 @@ class QueryDensEstTree{
             return 0L;
 
 
-        /**
-        * @brief IF were are a leaf node return the value equivalent to ratio of overlap region between 
-        *        query region and node region times the number of points present in the node.
-        */
         if(node->is_leaf_)
-            return  node->counts_* node->hy_mbr_.RatioOfOverlap(query_hymbr);
+            return  ExactLeafCount(node, query_hymbr);
         
 
         /* recurse for lower level nodes if non of the above criteria are met*/
@@ -341,6 +425,46 @@ class QueryDensEstTree{
             result+=EstimateCountHelper(tree_list_[i],query_hymbr);
         
         return result/QUERY_NUM_TREES_IN_FOREST;
+    }
+
+    /**
+    * @brief Estimate how many training query rectangles overlap `local_mbr`.
+    *
+    * Each query rectangle is represented as a 4D point:
+    * (low_x, low_y, high_x, high_y). A query overlaps the local MBR iff
+    * low_x < mbr.high_x, low_y < mbr.high_y,
+    * high_x > mbr.low_x, and high_y > mbr.low_y.
+    */
+    double_t EstimateOverlapCount(const BoundingRectangle& local_mbr){
+        HyperRectangle query_hymbr;
+        query_hymbr.low_hyperpoint_[0]=std::numeric_limits<double_t>::lowest();
+        query_hymbr.low_hyperpoint_[1]=std::numeric_limits<double_t>::lowest();
+        query_hymbr.low_hyperpoint_[2]=local_mbr.low_.elements_[0];
+        query_hymbr.low_hyperpoint_[3]=local_mbr.low_.elements_[1];
+
+        query_hymbr.high_hyperpoint_[0]=local_mbr.high_.elements_[0];
+        query_hymbr.high_hyperpoint_[1]=local_mbr.high_.elements_[1];
+        query_hymbr.high_hyperpoint_[2]=std::numeric_limits<double_t>::max();
+        query_hymbr.high_hyperpoint_[3]=std::numeric_limits<double_t>::max();
+
+        double_t result = 0.0;
+        for(int i=0;i<QUERY_NUM_TREES_IN_FOREST;i++)
+            result+=EstimateOverlapCount(tree_list_[i], local_mbr, query_hymbr);
+
+        return result/QUERY_NUM_TREES_IN_FOREST;
+    }
+
+    double_t EstimateOverlapCount(QueryDensEstNode* node, const BoundingRectangle& local_mbr, HyperRectangle& query_hymbr){
+        if(IsCompletelyCoveredByOverlapRange(node->hy_mbr_, query_hymbr))
+            return node->counts_;
+
+        if(!(node->hy_mbr_.IsThereOverlap(query_hymbr)))
+            return 0L;
+
+        if(node->is_leaf_)
+            return ExactLeafOverlapCount(node, local_mbr);
+
+        return EstimateOverlapCount(node->children_[0],local_mbr,query_hymbr) + EstimateOverlapCount(node->children_[1],local_mbr,query_hymbr);
     }
 
 
