@@ -26,7 +26,6 @@
  */
 class RWTree: public RTreeBASE{
     public:
-        std::vector<Query> training_queries_;
         QueryDensEstTree* query_scan_cost_estimator_{NULL};
         size_t query_scan_cost_estimator_granularity_{1};
 
@@ -57,24 +56,8 @@ class RWTree: public RTreeBASE{
 
         /** Build the 4D query-endpoint density estimator used by the RW cost oracle. */
         void BuildQueryScanCostEstimator(std::vector<Query> queries){
-            if(queries.empty())
-                return;
-
-            BoundingRectangle query_endpoint_mbr(queries[0].low_, queries[0].low_);
-            for(auto& query: queries){
-                query_endpoint_mbr.UpdateBoundingBoxWithPoint(query.low_);
-                query_endpoint_mbr.UpdateBoundingBoxWithPoint(query.high_);
-            }
-
-            for(size_t dim=0;dim<Constants::DIM;dim++){
-                double_t span = query_endpoint_mbr.high_.elements_[dim] - query_endpoint_mbr.low_.elements_[dim];
-                double_t padding = std::max(Constants::EPSILON_ERR, span*Constants::EPSILON_ERR);
-                query_endpoint_mbr.low_.elements_[dim] -= padding;
-                query_endpoint_mbr.high_.elements_[dim] += padding;
-            }
-
             delete query_scan_cost_estimator_;
-            query_scan_cost_estimator_ = new QueryDensEstTree(std::move(queries), query_scan_cost_estimator_granularity_, query_endpoint_mbr);
+            query_scan_cost_estimator_ = new QueryDensEstTree(std::move(queries), query_scan_cost_estimator_granularity_);
         }
 
         /** Estimate page-scan cost as the number of training queries intersecting `mbr`. */
@@ -82,11 +65,7 @@ class RWTree: public RTreeBASE{
             if(query_scan_cost_estimator_!=NULL)
                 return query_scan_cost_estimator_->EstimateOverlapCount(mbr);
 
-            double_t cost = 0.0;
-            for(auto& query: training_queries_)
-                if(query.IsThereOverlap(mbr))
-                    cost += 1.0;
-            return cost;
+            return 0.0;
         }
 
         /** Bootstrap the incremental RWTree construction from the initial block. */

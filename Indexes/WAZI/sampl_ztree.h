@@ -23,7 +23,6 @@
 #include<string>
 #include"ztree.h"
 #include"../utils/density_estimators/dens_est.h"
-#include"../utils/density_estimators/query_dens_est.h"
 #include"../utils/point.h"
 #include"../utils/sort_tools.h"
 #include"../utils/constants.h"
@@ -42,8 +41,6 @@ class SamplZTree: public ZTree{
     DensEstTree * datapoint_density_estimator_;
     DensEstTree * query_starts_density_estimator_;
     DensEstTree * query_ends_density_estimator_;
-
-    // QueryDensEstTree* query_density_estimator_;
 
     size_t random_sample_size_,dens_est_data_gran_,dens_est_query_gran_;
     double_t skip_alpha_;
