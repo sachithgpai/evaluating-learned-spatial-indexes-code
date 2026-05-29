@@ -20,7 +20,6 @@ rsmi_script="${repo_root}/Indexes/RTree/RSMI.py"
 config_reader="${script_dir}/read_experiment_config.py"
 
 evaluate_tasks="${script_dir}/hq_eval_tasks"
-legacy_evaluate_tasks="${script_dir}/hq_tasks_evaluate"
 rsmi_tasks="${script_dir}/hq_tasks_RSMI"
 evaluate_line_runner="${script_dir}/evaluate_line_n.sh"
 rsmi_line_runner="${script_dir}/rsmi_line_n.sh"
@@ -41,7 +40,7 @@ num_dataset_samples="${config_lines[3]}"
 num_data_entropy_variants="${config_lines[4]}"
 num_query_entropy_variants="${config_lines[5]}"
 
-rm -f "${evaluate_tasks}" "${legacy_evaluate_tasks}" "${rsmi_tasks}"
+rm -f "${evaluate_tasks}" "${rsmi_tasks}"
 
 # Write one evaluation task for every configured data/query/selectivity/block-size combination.
 evaluation_task_id=0
@@ -91,8 +90,6 @@ for ((data_ent_id = 1; data_ent_id <= num_data_entropy_variants; data_ent_id++))
     done
 done
 
-# Keep the old task-list filename as a compatibility alias for older notes and scripts.
-cp "${evaluate_tasks}" "${legacy_evaluate_tasks}"
 
 evaluation_task_count="$(wc -l < "${evaluate_tasks}" | tr -d '[:space:]')"
 rsmi_task_count="$(wc -l < "${rsmi_tasks}" | tr -d '[:space:]')"
@@ -165,7 +162,6 @@ chmod +x "${evaluate_line_runner}"
 chmod +x "${rsmi_line_runner}"
 
 echo "Wrote ${evaluation_task_count} evaluation tasks to ${evaluate_tasks}"
-echo "Wrote compatibility task list to ${legacy_evaluate_tasks}"
 echo "Wrote ${rsmi_task_count} RSMI tasks to ${rsmi_tasks}"
 echo "Wrote Slurm evaluation array script to ${slurm_evaluate_script}"
 echo "Wrote Slurm RSMI array script to ${slurm_rsmi_script}"
