@@ -12,6 +12,7 @@
 #include<stdexcept>
 #include<thread>
 #include<random>
+#include<utility>
 
 // All the models.
 // #include <torch/script.h> // One-stop header..
@@ -131,12 +132,13 @@ int query_entropy_variants_from_config(const json& experiment_config) {
 }
 
 template <typename T>
-void shuffle_vector(vector<T>& values) {
-    static thread_local mt19937 rng(random_device{}());
+void shuffle_vector(vector<T>& values, mt19937& rng) {
     shuffle(values.begin(), values.end(), rng);
 }
 
 int main(int argc, char* argv[]){
+    cout << unitbuf;
+    cerr << unitbuf;
 
     if(argc != 7 && argc != 8){
         cerr<<"Usage: "<<argv[0]
@@ -188,7 +190,7 @@ int main(int argc, char* argv[]){
     }
 
 
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" "<<PROJECT_ROOT<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" "<<PROJECT_ROOT<<endl;
 
 
     /*Reading the dataset and the entropy values*/
@@ -206,7 +208,7 @@ int main(int argc, char* argv[]){
     while (pointsfile >> a >> b)
         datapoints.push_back(Point(a,b));
     pointsfile.close();
-    cout<<"Finished loading points |D|:"<<datapoints.size()<<"\n";
+    cout<<"Finished loading points |D|:"<<datapoints.size()<<endl;
     if(datapoints.empty()){
         cerr<<"Datapoints file is empty: "<<points_path<<endl;
         return 1;
@@ -239,12 +241,16 @@ int main(int argc, char* argv[]){
     while (countbased_queriesfile >> a >> b >> c >> d)
         countbased_queries.push_back(Query(Point(a,b),Point(c,d)));
     countbased_queriesfile.close();
-    cout<<"Finished loading countbased_queries |Q|:"<<countbased_queries.size()<<"\n";
+    cout<<"Finished loading countbased_queries |Q|:"<<countbased_queries.size()<<endl;
     if(countbased_queries.empty()){
         cerr<<"Count-based query file is empty: "<<countbased_queries_path<<endl;
         return 1;
     }
 
+    mt19937 datapoint_shuffle_rng(1337);
+    mt19937 query_shuffle_rng(7331);
+    shuffle_vector(datapoints, datapoint_shuffle_rng);
+    shuffle_vector(countbased_queries, query_shuffle_rng);
 
     vector<double_t> query_entropy;
     filesystem::path query_entropy_path = dataset_root / "queries" / "entropy_values";
@@ -302,15 +308,14 @@ int main(int argc, char* argv[]){
     
     std::vector<json> list_of_results;
 
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" WAZI Started"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" WAZI Started"<<endl;
 
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
     {   //############# WAZI #################
         // Training
+        vector<Point> model_datapoints = datapoints;
+        vector<Query> model_queries = countbased_queries;
         auto train_start = std::chrono::high_resolution_clock::now();
-        SamplZTree wazi_obj(datapoints,countbased_queries);
+        SamplZTree wazi_obj(model_datapoints,model_queries);
         auto train_end = std::chrono::high_resolution_clock::now();
         double_t wazi_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
@@ -373,19 +378,17 @@ int main(int argc, char* argv[]){
         list_of_results.push_back(log_json);
     }
 
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" WAZI Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" WAZI Finished"<<endl;
 
 
 
 
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZIndexStarted"<<"\n";
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZIndexStarted"<<endl;
     {   //############# ZIndex #################
         // Training
+        vector<Point> model_datapoints = datapoints;
         auto train_start = std::chrono::high_resolution_clock::now();
-        BaseZTree zindex_obj(datapoints);
+        BaseZTree zindex_obj(model_datapoints);
         auto train_end = std::chrono::high_resolution_clock::now();
         double_t zindex_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
@@ -447,18 +450,16 @@ int main(int argc, char* argv[]){
 
         list_of_results.push_back(log_json);
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZIndex Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZIndex Finished"<<endl;
 
 
 
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZM-Index Started"<<"\n";
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZM-Index Started"<<endl;
     {   //############# ZM-Index #################
         // Training
+        vector<Point> model_datapoints = datapoints;
         auto train_start = std::chrono::high_resolution_clock::now();
-        ZMIndex zmindex_obj(datapoints);
+        ZMIndex zmindex_obj(std::move(model_datapoints));
         auto train_end = std::chrono::high_resolution_clock::now();
         double_t zmindex_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
         std::cout<<"Finished building ZM"<<std::endl;
@@ -542,21 +543,19 @@ int main(int argc, char* argv[]){
 
         list_of_results.push_back(log_json);
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZM-Index Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" ZM-Index Finished"<<endl;
     
     
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" GRID Started"<<"\n";
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" GRID Started"<<endl;
     {   //############# GRID #################
         // Training
+        vector<Point> model_datapoints = datapoints;
         auto train_start = std::chrono::high_resolution_clock::now();
         int num_splits_uniform_grid = int(sqrt(datapoints.size()/BLOCK_SIZE));
         std::array<int, 2> split_per_dim{num_splits_uniform_grid, num_splits_uniform_grid};
         std::array<int, 2> dim_order{0, 1};
         FloodIndex unigrid_obj( dim_order,split_per_dim);
-        unigrid_obj.LoadElements(datapoints);
+        unigrid_obj.LoadElements(model_datapoints);
         auto train_end = std::chrono::high_resolution_clock::now();
         double_t unigrid_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
@@ -618,21 +617,21 @@ int main(int argc, char* argv[]){
         }
         list_of_results.push_back(log_json);
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" GRID Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" GRID Finished"<<endl;
     
     
     
     
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" FLOOD Started"<<"\n";
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" FLOOD Started"<<endl;
     {   //############# FLOOD #################
         // Training
+        vector<Point> trainer_datapoints = datapoints;
+        vector<Point> model_datapoints = datapoints;
+        vector<Query> model_queries = countbased_queries;
         auto train_start = std::chrono::high_resolution_clock::now();
-        auto flood_config = FloodTrainerRandomSearch(datapoints,countbased_queries);
+        auto flood_config = FloodTrainerRandomSearch(trainer_datapoints,model_queries);
         FloodIndex flood_obj(flood_config.first,flood_config.second);
-        flood_obj.LoadElements(datapoints);
+        flood_obj.LoadElements(model_datapoints);
         auto train_end = std::chrono::high_resolution_clock::now();
 
 
@@ -697,18 +696,16 @@ int main(int argc, char* argv[]){
 
         list_of_results.push_back(log_json);
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" FLOOD Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" FLOOD Finished"<<endl;
     
     
     
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" STR Started"<<"\n";
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" STR Started"<<endl;
     {   /* ##########################    STR   ######################################*/
         // Training
+        vector<Point> model_datapoints = datapoints;
         auto train_start = std::chrono::high_resolution_clock::now();
-        STRTree str_tree_obj(datapoints);
+        STRTree str_tree_obj(std::move(model_datapoints));
         auto train_end = std::chrono::high_resolution_clock::now();
         double_t str_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
@@ -772,19 +769,17 @@ int main(int argc, char* argv[]){
         }
 
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" STR Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" STR Finished"<<endl;
     
     
     
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSTAR Started"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSTAR Started"<<endl;
 
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
     {   //########## RSTAR #################
         // Training
+        vector<Point> model_datapoints = datapoints;
         auto train_start = std::chrono::high_resolution_clock::now();
-        RSTARTree rstar_tree_obj(datapoints);
+        RSTARTree rstar_tree_obj(std::move(model_datapoints));
         auto train_end = std::chrono::high_resolution_clock::now();
         double_t rstar_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
@@ -848,20 +843,19 @@ int main(int argc, char* argv[]){
 
         list_of_results.push_back(log_json);
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSTAR Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSTAR Finished"<<endl;
     
     
     
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" CUR Started"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" CUR Started"<<endl;
 
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
     {   //########## CUR #################
         // Training
+        vector<Point> model_datapoints = datapoints;
+        vector<Query> model_queries = countbased_queries;
         auto train_start = std::chrono::high_resolution_clock::now();
-        CURTree cur_tree_obj(datapoints,countbased_queries);
-        cout<<" CUR Finished Building"<<"\n";
+        CURTree cur_tree_obj(std::move(model_datapoints),std::move(model_queries));
+        cout<<" CUR Finished Building"<<endl;
         auto train_end = std::chrono::high_resolution_clock::now();
         double_t cur_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
@@ -926,19 +920,20 @@ int main(int argc, char* argv[]){
 
         list_of_results.push_back(log_json);
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" CUR Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" CUR Finished"<<endl;
     
     
     
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RW Started"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RW Started"<<endl;
 
-    
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
     {   //########## RW #################
         // Training
+        vector<Point> model_datapoints = datapoints;
+        vector<Query> model_queries = countbased_queries;
         auto train_start = std::chrono::high_resolution_clock::now();
-        RWTree rw_tree_obj(datapoints,countbased_queries);
+        cout<<" RW Build Started"<<endl;
+        RWTree rw_tree_obj(std::move(model_datapoints),std::move(model_queries));
+        cout<<" RW Build Finished"<<endl;
         auto train_end = std::chrono::high_resolution_clock::now();
         double_t rw_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
@@ -1001,19 +996,16 @@ int main(int argc, char* argv[]){
         }
         list_of_results.push_back(log_json);
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RW Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RW Finished"<<endl;
     
     
     
     
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSMI Started"<<"\n";
-   
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSMI Started"<<endl;
     {    //########## RSMI-RTree-NoLocalModel #################
         // Training
         RTreeBASE rsmi_tree_obj(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/RSMI/"+query_agnostic_tree_name+".tree");
-        std::cout<<"Finished Loading RSMI-NoNN"<<"\n";
+        std::cout<<"Finished Loading RSMI-NoNN"<<std::endl;
 
         ifstream build_time_file(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/RSMI/"+query_agnostic_tree_name+".time",ios::in);
         double_t rsmi_tree_build_time;
@@ -1079,18 +1071,17 @@ int main(int argc, char* argv[]){
         }
         list_of_results.push_back(log_json);        
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSMI Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSMI Finished"<<endl;
     
     
     
     
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" KDTREE Started"<<"\n";
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" KDTREE Started"<<endl;
     {   //############# KDTREE #################
         // Training
+        vector<Point> model_datapoints = datapoints;
         auto train_start = std::chrono::high_resolution_clock::now();
-        KDTree kd_tree_obj(datapoints);
+        KDTree kd_tree_obj(std::move(model_datapoints));
         auto train_end = std::chrono::high_resolution_clock::now();
 
 
@@ -1158,25 +1149,25 @@ int main(int argc, char* argv[]){
 
         list_of_results.push_back(log_json);
     }
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" KDTREE Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" KDTREE Finished"<<endl;
     
 
 
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" QDTREE Started"<<"\n";
-   
-    shuffle_vector(datapoints);
-    shuffle_vector(countbased_queries);
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" QDTREE Started"<<endl;
     {    //############# QDTREE RandomSearchVersion #################
 
         // Training
+        vector<Point> trainer_datapoints = datapoints;
+        vector<Point> model_datapoints = datapoints;
+        vector<Query> model_queries = countbased_queries;
         auto train_start = std::chrono::high_resolution_clock::now();
-        QDTreeTrainerRandomSearch(datapoints,countbased_queries,PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/QDTree/"+tree_name+"_areabased.txt");
+        QDTreeTrainerRandomSearch(std::move(trainer_datapoints),model_queries,PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/QDTree/"+tree_name+"_areabased.txt");
         auto train_end = std::chrono::high_resolution_clock::now();
         
         double_t qd_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
         
-        QDTree qd_tree_obj(datapoints,PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/QDTree/"+tree_name+"_areabased.txt");
+        QDTree qd_tree_obj(std::move(model_datapoints),PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/QDTree/"+tree_name+"_areabased.txt");
 
 
 
@@ -1197,7 +1188,7 @@ int main(int argc, char* argv[]){
         log_json["result_size"]=result_size;
         log_json["query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
 
-        cout<<"QDTREE::Finished query processing"<<"\n";
+        cout<<"QDTREE::Finished query processing"<<endl;
 
         { // Extra Query Processing metrics
             vector<vector<size_t>> refined_blocks(countbased_queries.size());
@@ -1240,7 +1231,7 @@ int main(int argc, char* argv[]){
         list_of_results.push_back(log_json);
     }
 
-    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" QDTREE Random Search Finished"<<"\n";
+    cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" QDTREE Random Search Finished"<<endl;
 
 
 
