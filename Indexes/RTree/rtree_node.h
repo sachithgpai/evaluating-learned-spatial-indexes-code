@@ -17,11 +17,15 @@ class RTreeNode{
         
         size_t local_block_id_;
         bool is_leaf_;
+        bool cached_scan_cost_valid_;
+        double_t cached_scan_cost_;
 
         /** Create an empty leaf node. */
         RTreeNode(){
             is_leaf_=true;
             local_block_id_=0;
+            cached_scan_cost_valid_=false;
+            cached_scan_cost_=0.0;
         }
 
         /** Recursively delete the child subtrees. */
@@ -50,7 +54,7 @@ class NodeStatsPointInsert{
 
         double_t delta_overlap_volume_{};               // Sum of volume overlap change between current cell and other siblings
 
-        double_t cost_;
+        double_t cost_{};
         double_t delta_cost_{};
 
         /** Default-construct an empty statistics bundle. */

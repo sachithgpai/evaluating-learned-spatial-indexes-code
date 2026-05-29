@@ -8,6 +8,9 @@
 #include<iterator>
 #include<string>
 #include<array>
+#include<algorithm>
+#include<cstdlib>
+#include<limits>
 
 #include"../utils/local_model.h"
 #include"../utils/query.h"
@@ -27,7 +30,8 @@
 class RWTree: public RTreeBASE{
     public:
         QueryDensEstTree* query_scan_cost_estimator_{NULL};
-        size_t query_scan_cost_estimator_granularity_{1};
+        size_t query_scan_cost_estimator_granularity_{4};
+        size_t choose_subtree_query_top_k_{4};
 
         /** Create an empty RWTree shell. */
         RWTree(){}
@@ -44,6 +48,7 @@ class RWTree: public RTreeBASE{
         /** Build an RWTree from data and the training query workload. */
         RWTree(std::vector<Point> data, std::vector<Query> queries){
 
+            ConfigureBuildParameters();
             BuildQueryScanCostEstimator(std::move(queries));
             BuildRWTree(data);
             block_store_.FinishedConstruction();
@@ -68,6 +73,47 @@ class RWTree: public RTreeBASE{
             return 0.0;
         }
 
+        /** Estimate and memoize the scan cost for a node's current MBR. */
+        double_t CachedScanCost(RTreeNode* node){
+            if(!node->cached_scan_cost_valid_){
+                node->cached_scan_cost_ = EstimateScanCost(node->mbr_);
+                node->cached_scan_cost_valid_ = true;
+            }
+            return node->cached_scan_cost_;
+        }
+
+        /** Mark a node's cached scan cost stale after changing its MBR. */
+        void InvalidateCachedScanCost(RTreeNode* node){
+            if(node!=NULL)
+                node->cached_scan_cost_valid_ = false;
+        }
+
+        /** Read a positive integer build parameter from the environment. */
+        static size_t ReadPositiveSizeTEnv(const char* name, size_t fallback){
+            const char* raw_value = std::getenv(name);
+            if(raw_value==NULL || raw_value[0]=='\0' || raw_value[0]=='-')
+                return fallback;
+
+            char* parse_end = NULL;
+            unsigned long long parsed_value = std::strtoull(raw_value, &parse_end, 10);
+            if(parse_end==raw_value || parsed_value==0)
+                return fallback;
+
+            return static_cast<size_t>(parsed_value);
+        }
+
+        /** Configure RW construction knobs, with env vars for quick experiments. */
+        void ConfigureBuildParameters(){
+            query_scan_cost_estimator_granularity_ = ReadPositiveSizeTEnv(
+                "RW_QUERY_GRANULARITY",
+                query_scan_cost_estimator_granularity_
+            );
+            choose_subtree_query_top_k_ = ReadPositiveSizeTEnv(
+                "RW_CHOOSE_TOP_K",
+                choose_subtree_query_top_k_
+            );
+        }
+
         /** Bootstrap the incremental RWTree construction from the initial block. */
         void BuildRWTree(std::vector<Point>& data){
 
@@ -83,6 +129,7 @@ class RWTree: public RTreeBASE{
             root_->is_leaf_=false;
             root_->children_.push_back(initial_child);
             root_->mbr_.UpdateBoundingBoxWithBoundingBox(initial_child->mbr_);
+            InvalidateCachedScanCost(root_);
          
             // Insert rest of the points iteratively.
             for(size_t it=BLOCK_SIZE;it<data.size();it++)
@@ -100,12 +147,13 @@ class RWTree: public RTreeBASE{
             std::reverse(parents.begin(),parents.end()); // make the parents array bottom up.
 
             // insert pnt into leaf_node_to_insert_point. IF it overflows, split it into two. 
-            size_t &block_id = leaf_node_to_insert_point->local_block_id_,new_block_id;
+            size_t &block_id = leaf_node_to_insert_point->local_block_id_;
             if(block_store_.InsertNewPointInBlock(pnt,block_id)>BLOCK_SIZE){
                 // Take all points from given block and put back half of the points. 
                 std::vector<Point> temp_arr = block_store_.FetchPointsInBlock(block_id);
                 size_t split_pos = SplitPointsIntoTwo(temp_arr);
                 leaf_node_to_insert_point->mbr_ = block_store_.ReassignPointsInBlock(block_id,temp_arr.begin(),temp_arr.begin()+split_pos);
+                InvalidateCachedScanCost(leaf_node_to_insert_point);
                 
 
                 // Create a new leaf node and place back.
@@ -114,11 +162,14 @@ class RWTree: public RTreeBASE{
                 new_node->mbr_=block_store_.FetchBoundingBoxForBlock(new_node->local_block_id_);
                 parents[0]->children_.push_back(new_node);
                 parents[0]->mbr_.UpdateBoundingBoxWithBoundingBox(new_node->mbr_);
+                InvalidateCachedScanCost(parents[0]);
 
             }
             else{
                 leaf_node_to_insert_point->mbr_.UpdateBoundingBoxWithPoint(pnt);
+                InvalidateCachedScanCost(leaf_node_to_insert_point);
                 parents[0]->mbr_.UpdateBoundingBoxWithBoundingBox(leaf_node_to_insert_point->mbr_);
+                InvalidateCachedScanCost(parents[0]);
             }
 
             
@@ -137,12 +188,14 @@ class RWTree: public RTreeBASE{
                     for(auto& child: new_node->children_)
                         new_node->mbr_.UpdateBoundingBoxWithBoundingBox(child->mbr_);
                     new_node->is_leaf_=false;
+                    InvalidateCachedScanCost(new_node);
 
                     // update the current node by removing the secoond half of nodes and updating the bounding box.
                     parents[parent_to_split]->mbr_.SetToDefault();
                     parents[parent_to_split]->children_.resize(split_location);
                     for(auto& child: parents[parent_to_split]->children_)
                         parents[parent_to_split]->mbr_.UpdateBoundingBoxWithBoundingBox(child->mbr_);
+                    InvalidateCachedScanCost(parents[parent_to_split]);
 
 
                     if(parent_to_split==parents.size()-1){              // if the rood node is overflowing create a new root node.
@@ -152,16 +205,20 @@ class RWTree: public RTreeBASE{
                         root_->mbr_.UpdateBoundingBoxWithBoundingBox(parents[parent_to_split]->mbr_);
                         root_->mbr_.UpdateBoundingBoxWithBoundingBox(new_node->mbr_);
                         root_->children_.push_back(new_node);
+                        InvalidateCachedScanCost(root_);
 
                     }
                     else{
                         parents[parent_to_split+1]->mbr_.UpdateBoundingBoxWithBoundingBox(parents[parent_to_split]->mbr_);
                         parents[parent_to_split+1]->mbr_.UpdateBoundingBoxWithBoundingBox(new_node->mbr_);
                         parents[parent_to_split+1]->children_.push_back(new_node);
+                        InvalidateCachedScanCost(parents[parent_to_split+1]);
                     }
                 }
-                else if(parent_to_split!=0)
+                else if(parent_to_split!=0){
                     parents[parent_to_split]->mbr_.UpdateBoundingBoxWithBoundingBox(parents[parent_to_split-1]->mbr_);
+                    InvalidateCachedScanCost(parents[parent_to_split]);
+                }
 
                 parent_to_split++;
             }
@@ -348,33 +405,50 @@ class RWTree: public RTreeBASE{
             // a structure to hold stats required to perform choose subtree.
             std::vector<NodeStatsPointInsert> children_stats;       
 
-            // for each child compute delta volume and volume and cost and delta cost
-            BoundingRectangle expanded_mbr;
+            // Cheaply rank all children by geometry, then run the query-cost oracle
+            // only on the most promising candidates.
             size_t child_id=0;
             for(auto& child_ptr: node->children_){
-                expanded_mbr = child_ptr->mbr_; 
-                expanded_mbr.UpdateBoundingBoxWithPoint(insert_pnt);
                 children_stats.emplace_back(child_id,child_ptr->mbr_,insert_pnt);
-                children_stats.back().cost_ = EstimateScanCost(child_ptr->mbr_);
-                children_stats.back().delta_cost_ = EstimateScanCost(expanded_mbr)-children_stats.back().cost_;
                 child_id++;
             }
 
-            // Sort by workload cost first, then cheap geometric tie-breakers.
+            auto cheap_nspi_comp = [](const NodeStatsPointInsert& ns1,const NodeStatsPointInsert& ns2) {
+                return std::tie(ns1.delta_volume_, ns1.volume_, ns1.delta_perim_, ns1.perim_) <
+                       std::tie(ns2.delta_volume_, ns2.volume_, ns2.delta_perim_, ns2.perim_);
+            };
+            std::sort(children_stats.begin(),children_stats.end(),cheap_nspi_comp);
+
+            size_t candidate_count = std::min(
+                std::max<size_t>(1, choose_subtree_query_top_k_),
+                children_stats.size()
+            );
+            for(size_t candidate_id=0;candidate_id<candidate_count;candidate_id++){
+                auto& candidate = children_stats[candidate_id];
+                RTreeNode* child_node = node->children_[candidate.child_pointer_id_];
+                candidate.cost_ = CachedScanCost(child_node);
+                if(candidate.delta_volume_ < Constants::EPSILON_ERR)
+                    candidate.delta_cost_ = 0.0;
+                else
+                    candidate.delta_cost_ = EstimateScanCost(candidate.expanded_mbr_)-candidate.cost_;
+            }
+
+            // Sort the candidate set by workload cost first, then cheap geometric tie-breakers.
             auto nspi_comp = [](const NodeStatsPointInsert& ns1,const NodeStatsPointInsert& ns2) {
                 return std::tie(ns1.delta_cost_, ns1.cost_, ns1.delta_volume_, ns1.volume_) <
                        std::tie(ns2.delta_cost_, ns2.cost_, ns2.delta_volume_, ns2.volume_);
             };
-            std::sort(children_stats.begin(),children_stats.end(),nspi_comp);
+            std::sort(children_stats.begin(),children_stats.begin()+candidate_count,nspi_comp);
 
             //IF you find nodes that covers the point to be inserted then pick the one with smallest volume (already achieved by nspi_comp)
             if(children_stats[0].delta_cost_ < Constants::EPSILON_ERR || node->children_[0]->is_leaf_==false)
                 return ChooseSubtree(node->children_[children_stats[0].child_pointer_id_],insert_pnt,parents);
 
-            //ELSE find a 
+            //ELSE find the least-overlapping choice inside the query-ranked candidate set.
             double_t argmin_delta_overlap_volume = std::numeric_limits<double_t>::max();
             size_t argmin_child_id = 0;
-            for(auto& ns:children_stats){
+            for(size_t candidate_id=0;candidate_id<candidate_count;candidate_id++){
+                auto& ns = children_stats[candidate_id];
                 for(size_t cid=0;cid<node->children_.size();cid++)
                     if(ns.child_pointer_id_!=cid)
                         ns.delta_overlap_volume_+= ns.expanded_mbr_.AreaOfOverlap(node->children_[cid]->mbr_);
