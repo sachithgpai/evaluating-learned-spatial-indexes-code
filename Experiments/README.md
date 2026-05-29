@@ -123,7 +123,9 @@ EXPERIMENT_CONFIG=/path/to/the/same/config.json sbatch slurm_evaluate_array.sh
 ```
 
 `create_tasklist.sh` writes the `#SBATCH --array` range into `slurm_evaluate_array.sh`,
-so rerun it after changing the config. The Slurm jobs read data, trained models, and config files
+so rerun it after changing the config or task generation. Run Slurm commands from this
+`Experiments/` directory; the generated scripts use `SLURM_SUBMIT_DIR` to find `*_line_n.sh`
+and the task lists. The Slurm jobs read data, trained models, and config files
 from the repository checkout directly. They also use `<repo>/temp_blockstore/` for memory-mapped
 temporary blockstore files; there is no node-local scratch staging or copy-back step.
 

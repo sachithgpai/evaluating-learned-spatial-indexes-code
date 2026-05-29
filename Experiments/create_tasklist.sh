@@ -122,7 +122,12 @@ cat > "${slurm_evaluate_script}" <<EOF
 
 set -euo pipefail
 
-script_dir="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+script_dir="\${SLURM_SUBMIT_DIR:?Submit this script from the Experiments directory.}"
+if [[ ! -f "\${script_dir}/evaluate_line_n.sh" ]]; then
+    echo "evaluate_line_n.sh not found in SLURM_SUBMIT_DIR: \${script_dir}" >&2
+    echo "Run: cd <repo>/Experiments && sbatch slurm_evaluate_array.sh" >&2
+    exit 1
+fi
 task_list="\${EVALUATION_TASK_LIST:-\${script_dir}/hq_eval_tasks}"
 
 bash "\${script_dir}/evaluate_line_n.sh" "\${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}" "\${task_list}"
@@ -143,7 +148,12 @@ cat > "${slurm_rsmi_script}" <<EOF
 
 set -euo pipefail
 
-script_dir="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+script_dir="\${SLURM_SUBMIT_DIR:?Submit this script from the Experiments directory.}"
+if [[ ! -f "\${script_dir}/rsmi_line_n.sh" ]]; then
+    echo "rsmi_line_n.sh not found in SLURM_SUBMIT_DIR: \${script_dir}" >&2
+    echo "Run: cd <repo>/Experiments && sbatch slurm_rsmi_array.sh" >&2
+    exit 1
+fi
 task_list="\${RSMI_TASK_LIST:-\${script_dir}/hq_tasks_RSMI}"
 
 bash "\${script_dir}/rsmi_line_n.sh" "\${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}" "\${task_list}"

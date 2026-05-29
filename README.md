@@ -110,18 +110,19 @@ bash -e hq_eval_tasks
 After generating the dataset, compiling `build_evaluate.out`, and creating task lists, train RSMI first:
 
 ```bash
-cd "${REPO_ROOT}"
-sbatch Experiments/slurm_rsmi_array.sh
+cd "${REPO_ROOT}/Experiments"
+sbatch slurm_rsmi_array.sh
 ```
 
 Then submit the generated evaluation array script:
 
 ```bash
 EXPERIMENT_CONFIG="${CONFIG_PATH}" \
-sbatch Experiments/slurm_evaluate_array.sh
+sbatch slurm_evaluate_array.sh
 ```
 
 Keep `EXPERIMENT_CONFIG` set to the same config used by `create_tasklist.sh`, especially when using `small_experiment_config.json` or a custom config. The Slurm evaluation array reads data and writes results in the repository checkout directly; it does not stage data to node-local scratch or copy results back.
+Run both Slurm commands from `Experiments/`; the generated scripts use `SLURM_SUBMIT_DIR` to find `*_line_n.sh` and the task lists.
 
 ## Real Workloads
 
