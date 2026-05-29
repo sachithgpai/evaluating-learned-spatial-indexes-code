@@ -69,6 +69,7 @@ if [[ "${task_argv[0]:-}" == "env" ]]; then
     command_tail=("${task_argv[@]:${command_start}}")
 
     set_env_assignment "PROJECT_ROOT" "${repo_root}"
+    set_env_assignment "EXPERIMENT_RESULT_FILE" "${line_number}.jsonl"
     set_env_assignment "TEMP_BLOCKSTORE_DIR" "${repo_root}/temp_blockstore"
 
     task_argv=(
@@ -80,6 +81,7 @@ else
     task_argv=(
         env
         "PROJECT_ROOT=${repo_root}"
+        "EXPERIMENT_RESULT_FILE=${line_number}.jsonl"
         "TEMP_BLOCKSTORE_DIR=${repo_root}/temp_blockstore"
         "${task_argv[@]}"
     )

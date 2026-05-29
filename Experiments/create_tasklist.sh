@@ -44,13 +44,15 @@ num_query_entropy_variants="${config_lines[5]}"
 rm -f "${evaluate_tasks}" "${legacy_evaluate_tasks}" "${rsmi_tasks}"
 
 # Write one evaluation task for every configured data/query/selectivity/block-size combination.
+evaluation_task_id=0
 for ((data_ent_id = 1; data_ent_id <= num_data_entropy_variants; data_ent_id++)); do
     for ((data_sample_num = 1; data_sample_num <= num_dataset_samples; data_sample_num++)); do
         for block_size in "${block_sizes[@]}"; do
             for selectivity_id in "${!selectivities[@]}"; do
                 selectivity="${selectivities[${selectivity_id}]}"
                 for ((query_ent_id = 1; query_ent_id <= num_query_entropy_variants; query_ent_id++)); do
-                    result_file="P_${block_size}_D_${data_sample_num}_DE_${data_ent_id}_Q_${query_ent_id}_S_${selectivity}.jsonl"
+                    ((++evaluation_task_id))
+                    result_file="${evaluation_task_id}.jsonl"
                     {
                         printf '%q ' \
                             env \

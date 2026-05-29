@@ -106,6 +106,7 @@ bash evaluate_line_n.sh 1
 ```
 
 Evaluation runs write results to `Experiments/<dataset_name>/ResultsFolder/`.
+Each evaluation task writes `<line_number>.jsonl`, where the line number is its row in `hq_eval_tasks`.
 
 ## Slurm Array Workflow
 
