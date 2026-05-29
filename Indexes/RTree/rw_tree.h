@@ -32,6 +32,8 @@ class RWTree: public RTreeBASE{
         QueryDensEstTree* query_scan_cost_estimator_{NULL};
         size_t query_scan_cost_estimator_granularity_{4};
         size_t choose_subtree_query_top_k_{4};
+        size_t split_nodes_query_top_k_{4};
+        size_t split_points_query_top_k_{16};
 
         /** Create an empty RWTree shell. */
         RWTree(){}
@@ -88,6 +90,15 @@ class RWTree: public RTreeBASE{
                 node->cached_scan_cost_valid_ = false;
         }
 
+        /** Return true when inserting the point would leave this MBR unchanged. */
+        bool PointDoesNotExpandMBR(const BoundingRectangle& mbr, const Point& pnt){
+            for(size_t dim=0;dim<Constants::DIM;dim++)
+                if(pnt.elements_[dim] < mbr.low_.elements_[dim] || pnt.elements_[dim] > mbr.high_.elements_[dim])
+                    return false;
+
+            return true;
+        }
+
         /** Read a positive integer build parameter from the environment. */
         static size_t ReadPositiveSizeTEnv(const char* name, size_t fallback){
             const char* raw_value = std::getenv(name);
@@ -111,6 +122,14 @@ class RWTree: public RTreeBASE{
             choose_subtree_query_top_k_ = ReadPositiveSizeTEnv(
                 "RW_CHOOSE_TOP_K",
                 choose_subtree_query_top_k_
+            );
+            split_nodes_query_top_k_ = ReadPositiveSizeTEnv(
+                "RW_SPLIT_NODES_TOP_K",
+                split_nodes_query_top_k_
+            );
+            split_points_query_top_k_ = ReadPositiveSizeTEnv(
+                "RW_SPLIT_POINTS_TOP_K",
+                split_points_query_top_k_
             );
         }
 
@@ -228,93 +247,100 @@ class RWTree: public RTreeBASE{
         /** Split an overflowing internal node and return the split position. */
         size_t SplitNodesIntoTwo(std::vector<RTreeNode*>& temp_arr){
 
+            struct NodeSplitCandidate{
+                size_t split_pos_;
+                size_t sort_dim_;
+                bool sort_high_;
+                BoundingRectangle left_mbr_;
+                BoundingRectangle right_mbr_;
+                double_t cheap_perimeter_;
+                double_t cheap_area_;
+                double_t query_cost_;
+            };
+
+            std::vector<NodeSplitCandidate> split_candidates;
+            split_candidates.reserve(4*(temp_arr.size()-2*RW_MINBRANCH+1));
+
+            // Generate every legal split across low/high ordering in each dimension.
+            // The cheap rank uses perimeter first because compact groups tend to reduce
+            // future overlap, then area as a tie-breaker. Query cost is paid later only
+            // for the best split_nodes_query_top_k_ candidates.
+            auto add_candidates_for_order = [&](size_t candidate_sort_dim, bool sort_high) {
+                auto sorter = [candidate_sort_dim, sort_high](const RTreeNode* n1,const RTreeNode* n2) {
+                    if(sort_high)
+                        return n1->mbr_.high_.elements_[candidate_sort_dim]<n2->mbr_.high_.elements_[candidate_sort_dim];
+                    return n1->mbr_.low_.elements_[candidate_sort_dim]<n2->mbr_.low_.elements_[candidate_sort_dim];
+                };
+                std::sort(temp_arr.begin(), temp_arr.end(), sorter);
+
+                std::vector<BoundingRectangle> right_mbrs(temp_arr.size()+1);
+                right_mbrs[temp_arr.size()].SetToDefault();
+                for(size_t pos=temp_arr.size();pos>0;pos--){
+                    right_mbrs[pos-1] = right_mbrs[pos];
+                    right_mbrs[pos-1].UpdateBoundingBoxWithBoundingBox(temp_arr[pos-1]->mbr_);
+                }
+
+                BoundingRectangle left_mbr;
+                left_mbr.SetToDefault();
+                for(size_t pos=0;pos<temp_arr.size()-RW_MINBRANCH;pos++){
+                    left_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[pos]->mbr_);
+                    size_t split_pos = pos+1;
+                    if(split_pos<RW_MINBRANCH)
+                        continue;
+
+                    BoundingRectangle right_mbr = right_mbrs[split_pos];
+                    split_candidates.push_back({
+                        split_pos,
+                        candidate_sort_dim,
+                        sort_high,
+                        left_mbr,
+                        right_mbr,
+                        left_mbr.Perimeter()+right_mbr.Perimeter(),
+                        left_mbr.Area()+right_mbr.Area(),
+                        0.0
+                    });
+                }
+            };
+
+            for(size_t ord=0;ord<Constants::DIM;ord++){
+                add_candidates_for_order(ord, false);
+                add_candidates_for_order(ord, true);
+            }
+
+            auto cheap_split_comp = [](const NodeSplitCandidate& lhs, const NodeSplitCandidate& rhs) {
+                return std::tie(lhs.cheap_perimeter_, lhs.cheap_area_, lhs.split_pos_) <
+                       std::tie(rhs.cheap_perimeter_, rhs.cheap_area_, rhs.split_pos_);
+            };
+            std::sort(split_candidates.begin(), split_candidates.end(), cheap_split_comp);
+
+            size_t candidate_count = std::min(
+                std::max<size_t>(1, split_nodes_query_top_k_),
+                split_candidates.size()
+            );
+
+            // Refine only the cheap shortlist with the RW workload objective:
+            // estimated scans for the left split MBR plus the right split MBR.
             double_t min_split_cost = std::numeric_limits<double_t>::max();
-            size_t argmin_split_cost, sort_dim, split_using_low_or_high;
-            std::vector<double_t> perimeters;            
-            BoundingRectangle temp_mbr;
-
-
-
-            for(int ord=0;ord<2;ord++){
-
-                // Comparing against low
-                auto sort_nodes_low = [ord](const RTreeNode* n1,const RTreeNode* n2) { return n1->mbr_.low_.elements_[ord]<n2->mbr_.low_.elements_[ord];};
-                perimeters.clear();
-                perimeters.resize(temp_arr.size()-2*RW_MINBRANCH+1,0.0);
-                temp_mbr.SetToDefault();
-                std::sort(temp_arr.begin(), temp_arr.end(), sort_nodes_low);
-                
-                for(int i=0;i<RW_MINBRANCH-1;i++)
-                    temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-
-                for(int i=RW_MINBRANCH-1;i<temp_arr.size()-RW_MINBRANCH;i++){
-                    temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-                    perimeters[i-(RW_MINBRANCH-1)]+=EstimateScanCost(temp_mbr);
+            size_t argmin_candidate = 0;
+            for(size_t candidate_id=0;candidate_id<candidate_count;candidate_id++){
+                auto& candidate = split_candidates[candidate_id];
+                candidate.query_cost_ = EstimateScanCost(candidate.left_mbr_)+
+                                        EstimateScanCost(candidate.right_mbr_);
+                if(candidate.query_cost_<min_split_cost){
+                    min_split_cost = candidate.query_cost_;
+                    argmin_candidate = candidate_id;
                 }
-
-                temp_mbr.SetToDefault();
-
-                for(int i=temp_arr.size()-1;i>temp_arr.size()-RW_MINBRANCH;i--)
-                    temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);  
-
-                for(int i=temp_arr.size()-RW_MINBRANCH;i>=RW_MINBRANCH;i--){
-                    temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-                    perimeters[i-RW_MINBRANCH]+=EstimateScanCost(temp_mbr);
-                    if(perimeters[i-RW_MINBRANCH]<min_split_cost){
-                        sort_dim=ord;
-                        argmin_split_cost=i;
-                        min_split_cost=perimeters[i-RW_MINBRANCH];
-                        split_using_low_or_high=0;
-                    }
-                }
-                
-
-                auto sort_nodes_high = [ord](const RTreeNode* n1,const RTreeNode* n2) { return n1->mbr_.high_.elements_[ord]<n2->mbr_.high_.elements_[ord];};
-                perimeters.clear();
-                perimeters.resize(temp_arr.size()-2*RW_MINBRANCH+1,0.0);
-                temp_mbr.SetToDefault();
-                std::sort(temp_arr.begin(), temp_arr.end(), sort_nodes_high);
-                
-                for(int i=0;i<RW_MINBRANCH-1;i++)
-                    temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-
-                for(int i=RW_MINBRANCH-1;i<temp_arr.size()-RW_MINBRANCH;i++){
-                    temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-                    perimeters[i-(RW_MINBRANCH-1)]+=EstimateScanCost(temp_mbr);
-                }
-
-                temp_mbr.SetToDefault();
-
-                for(int i=temp_arr.size()-1;i>temp_arr.size()-RW_MINBRANCH;i--)
-                    temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);  
-
-                for(int i=temp_arr.size()-RW_MINBRANCH;i>=RW_MINBRANCH;i--){
-                    temp_mbr.UpdateBoundingBoxWithBoundingBox(temp_arr[i]->mbr_);
-                    perimeters[i-RW_MINBRANCH]+=EstimateScanCost(temp_mbr);
-                    if(perimeters[i-RW_MINBRANCH]<min_split_cost){
-                        sort_dim=ord;
-                        argmin_split_cost=i;
-                        min_split_cost=perimeters[i-RW_MINBRANCH];
-                        split_using_low_or_high=1;
-                    }
-                }
-                
-                
             }
 
+            const auto& best_candidate = split_candidates[argmin_candidate];
+            auto final_sorter = [&best_candidate](const RTreeNode* n1,const RTreeNode* n2) {
+                if(best_candidate.sort_high_)
+                    return n1->mbr_.high_.elements_[best_candidate.sort_dim_]<n2->mbr_.high_.elements_[best_candidate.sort_dim_];
+                return n1->mbr_.low_.elements_[best_candidate.sort_dim_]<n2->mbr_.low_.elements_[best_candidate.sort_dim_];
+            };
+            std::sort(temp_arr.begin(), temp_arr.end(), final_sorter);
 
-
-            if(split_using_low_or_high){
-                auto sorter = [sort_dim](const RTreeNode* n1,const RTreeNode* n2) { return n1->mbr_.high_.elements_[sort_dim]<n2->mbr_.high_.elements_[sort_dim];};
-                std::sort(temp_arr.begin(), temp_arr.end(), sorter);
-            }
-
-            else{
-                auto sorter = [sort_dim](const RTreeNode* n1,const RTreeNode* n2) { return n1->mbr_.low_.elements_[sort_dim]<n2->mbr_.low_.elements_[sort_dim];};
-                std::sort(temp_arr.begin(), temp_arr.end(), sorter);
-            }
-                
-            return argmin_split_cost;
+            return best_candidate.split_pos_;
 
 
         }
@@ -323,71 +349,85 @@ class RWTree: public RTreeBASE{
         /* Function splits the points into two. The function sorts the array according to best sort dim and returns the location of split*/
         size_t SplitPointsIntoTwo(std::vector<Point>& temp_arr){
 
+            struct PointSplitCandidate{
+                size_t split_pos_;
+                size_t sort_dim_;
+                BoundingRectangle left_mbr_;
+                BoundingRectangle right_mbr_;
+                double_t cheap_perimeter_;
+                double_t cheap_area_;
+                double_t query_cost_;
+            };
+
+            std::vector<PointSplitCandidate> split_candidates;
+            split_candidates.reserve(2*(temp_arr.size()-2*MINFILL+1));
+
+            // Generate every legal split in X and Y order. The cheap rank uses
+            // perimeter first, then area, to shortlist compact candidate pages before
+            // invoking the expensive query-density estimator.
+            auto add_candidates_for_sort = [&](size_t candidate_sort_dim) {
+                std::sort(temp_arr.begin(), temp_arr.end(), SortOrderer(candidate_sort_dim));
+
+                std::vector<BoundingRectangle> right_mbrs(temp_arr.size()+1);
+                right_mbrs[temp_arr.size()].SetToDefault();
+                for(size_t pos=temp_arr.size();pos>0;pos--){
+                    right_mbrs[pos-1] = right_mbrs[pos];
+                    right_mbrs[pos-1].UpdateBoundingBoxWithPoint(temp_arr[pos-1]);
+                }
+
+                BoundingRectangle left_mbr;
+                left_mbr.SetToDefault();
+                for(size_t pos=0;pos<temp_arr.size()-MINFILL;pos++){
+                    left_mbr.UpdateBoundingBoxWithPoint(temp_arr[pos]);
+                    size_t split_pos = pos+1;
+                    if(split_pos<MINFILL)
+                        continue;
+
+                    BoundingRectangle right_mbr = right_mbrs[split_pos];
+                    split_candidates.push_back({
+                        split_pos,
+                        candidate_sort_dim,
+                        left_mbr,
+                        right_mbr,
+                        left_mbr.Perimeter()+right_mbr.Perimeter(),
+                        left_mbr.Area()+right_mbr.Area(),
+                        0.0
+                    });
+                }
+            };
+
+            add_candidates_for_sort(SortX);
+            add_candidates_for_sort(SortY);
+
+            auto cheap_split_comp = [](const PointSplitCandidate& lhs, const PointSplitCandidate& rhs) {
+                return std::tie(lhs.cheap_perimeter_, lhs.cheap_area_, lhs.split_pos_) <
+                       std::tie(rhs.cheap_perimeter_, rhs.cheap_area_, rhs.split_pos_);
+            };
+            std::sort(split_candidates.begin(), split_candidates.end(), cheap_split_comp);
+
+            size_t candidate_count = std::min(
+                std::max<size_t>(1, split_points_query_top_k_),
+                split_candidates.size()
+            );
+
+            // Refine only the top split_points_query_top_k_ cheap candidates with
+            // the RW workload cost, avoiding hundreds of EstimateScanCost calls per
+            // leaf split.
             double_t min_split_cost = std::numeric_limits<double_t>::max();
-            size_t argmin_split_cost, sort_dim;
-            std::vector<double_t> costs_at_split;
-            costs_at_split.resize(temp_arr.size()-2*MINFILL+1,0.0);
-            BoundingRectangle temp_mbr;
-
-
-
-            std::sort(temp_arr.begin(), temp_arr.end(), SortOrderer(SortX));
-            temp_mbr.SetToDefault();
-
-            for(int i=0;i<MINFILL-1;i++)
-                temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-
-            for(int i=MINFILL-1;i<temp_arr.size()-MINFILL;i++){
-                temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-                costs_at_split[i-(MINFILL-1)]+=EstimateScanCost(temp_mbr);
-            }
-
-
-            temp_mbr.SetToDefault();
-            for(int i=temp_arr.size()-1;i>temp_arr.size()-MINFILL;i--)
-                temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-
-            for(int i=temp_arr.size()-MINFILL;i>=MINFILL;i--){
-                temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-                costs_at_split[i-MINFILL]+=EstimateScanCost(temp_mbr);
-                if(costs_at_split[i-MINFILL]<min_split_cost){
-                    sort_dim=SortX;
-                    argmin_split_cost=i;
-                    min_split_cost=costs_at_split[i-MINFILL];
+            size_t argmin_candidate = 0;
+            for(size_t candidate_id=0;candidate_id<candidate_count;candidate_id++){
+                auto& candidate = split_candidates[candidate_id];
+                candidate.query_cost_ = EstimateScanCost(candidate.left_mbr_)+
+                                        EstimateScanCost(candidate.right_mbr_);
+                if(candidate.query_cost_<min_split_cost){
+                    min_split_cost = candidate.query_cost_;
+                    argmin_candidate = candidate_id;
                 }
             }
 
-            costs_at_split.clear();
-            costs_at_split.resize(temp_arr.size()-2*MINFILL+1,0.0);
-            std::sort(temp_arr.begin(), temp_arr.end(), SortOrderer(SortY));
-            temp_mbr.SetToDefault();
-
-            for(int i=0;i<MINFILL-1;i++)
-                temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-
-            for(int i=MINFILL-1;i<temp_arr.size()-MINFILL;i++){
-                temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-                costs_at_split[i-(MINFILL-1)]+=EstimateScanCost(temp_mbr);
-            }
-
-
-            temp_mbr.SetToDefault();
-            for(int i=temp_arr.size()-1;i>temp_arr.size()-MINFILL;i--)
-                temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]); 
-
-            for(int i=temp_arr.size()-MINFILL;i>=MINFILL;i--){
-                temp_mbr.UpdateBoundingBoxWithPoint(temp_arr[i]);
-                costs_at_split[i-MINFILL]+=EstimateScanCost(temp_mbr);
-                if(costs_at_split[i-MINFILL]<min_split_cost){
-                    sort_dim=SortY;
-                    argmin_split_cost=i;
-                    min_split_cost=costs_at_split[i-MINFILL];
-                }
-            }
-
-
-            std::sort(temp_arr.begin(), temp_arr.end(), SortOrderer(sort_dim));
-            return argmin_split_cost;
+            const auto& best_candidate = split_candidates[argmin_candidate];
+            std::sort(temp_arr.begin(), temp_arr.end(), SortOrderer(best_candidate.sort_dim_));
+            return best_candidate.split_pos_;
         }
 
 
@@ -418,6 +458,16 @@ class RWTree: public RTreeBASE{
                        std::tie(ns2.delta_volume_, ns2.volume_, ns2.delta_perim_, ns2.perim_);
             };
             std::sort(children_stats.begin(),children_stats.end(),cheap_nspi_comp);
+
+            // If a child already covers the point, inserting there does not enlarge
+            // that child's MBR. The query-visible scan cost at this level therefore
+            // cannot increase, so skip the query-cost oracle and choose the smallest
+            // covering child by cheap geometry: area first, then perimeter.
+            for(auto& child_stats: children_stats){
+                RTreeNode* child_node = node->children_[child_stats.child_pointer_id_];
+                if(PointDoesNotExpandMBR(child_node->mbr_, insert_pnt))
+                    return ChooseSubtree(child_node,insert_pnt,parents);
+            }
 
             size_t candidate_count = std::min(
                 std::max<size_t>(1, choose_subtree_query_top_k_),
