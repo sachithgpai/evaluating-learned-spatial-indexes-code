@@ -10,7 +10,7 @@ The repository contains the C++ index implementations, workload generators, and 
 - `Datasets/`
   Workload generation for synthetic data, real parquet-backed data, and OSM-to-parquet conversion.
 - `Experiments/`
-  Evaluator, task-list generation, and HyperQueue/Slurm wrappers.
+  Evaluator, task-list generation, and Slurm array wrappers.
 - `Indexes/`
   Index implementations used by the evaluator.
 - `experiment_config.json`
@@ -29,8 +29,6 @@ For the synthetic pipeline:
 - Python packages used by RSMI training: `torch`, `scipy`, `scikit-learn`, `matplotlib`, `seaborn`, and the `zCurve` module imported by `Indexes/RTree/RSMI.py`
 
 For real workloads, also install `pyarrow`. For OSM PBF conversion, also install `osmium`.
-
-HyperQueue is only needed when submitting task lists through `hq` or the Slurm wrappers.
 
 ## End-to-End Synthetic Pipeline
 
@@ -55,7 +53,12 @@ EXPERIMENT_CONFIG="${CONFIG_PATH}" bash create_tasklist.sh "${DATASET_NAME}" "${
 This creates:
 
 - `Experiments/hq_tasks_RSMI`
-- `Experiments/hq_tasks_evaluate`
+- `Experiments/hq_eval_tasks`
+- `Experiments/hq_tasks_evaluate` compatibility copy
+- `Experiments/evaluate_line_n.sh`
+- `Experiments/slurm_evaluate_array.sh`
+- `Experiments/rsmi_line_n.sh`
+- `Experiments/slurm_rsmi_array.sh`
 - `Experiments/<dataset_name>/TrainedIndexes/`
 - `Experiments/<dataset_name>/ResultsFolder/`
 - `temp_blockstore/`
@@ -65,20 +68,18 @@ Train RSMI first, then run the evaluator. For a small local run, the task files 
 ```bash
 cd "${REPO_ROOT}/Experiments"
 bash -e hq_tasks_RSMI
-bash -e hq_tasks_evaluate
+bash -e hq_eval_tasks
 ```
 
-For HyperQueue, start a server and workers in your environment, then submit the same task files:
+To run one evaluation task by line number:
 
 ```bash
 cd "${REPO_ROOT}/Experiments"
-hq submit --each-line hq_tasks_RSMI
-hq job wait all
-hq submit --each-line hq_tasks_evaluate
-hq job wait all
+bash evaluate_line_n.sh 1
 ```
 
-Local and direct HyperQueue runs write JSONL results under `Experiments/<dataset_name>/ResultsFolder/`.
+Evaluation runs write JSONL results under `Experiments/<dataset_name>/ResultsFolder/`.
+Memory-mapped temporary blockstore files are created under `temp_blockstore/` and removed by the evaluator.
 
 ### Quick Smoke Test
 
@@ -100,7 +101,7 @@ g++ -std=c++17 evaluate_all_indexes.cpp -o build_evaluate.out
 EXPERIMENT_CONFIG="${CONFIG_PATH}" bash create_tasklist.sh "${DATASET_NAME}" "${EXPERIMENT_NAME}"
 
 bash -e hq_tasks_RSMI
-bash -e hq_tasks_evaluate
+bash -e hq_eval_tasks
 ```
 
 ## Slurm Pipeline
@@ -109,17 +110,17 @@ After generating the dataset, compiling `build_evaluate.out`, and creating task 
 
 ```bash
 cd "${REPO_ROOT}"
-sbatch Experiments/hq_server_farm_rsmi_jobs.sh
+sbatch Experiments/slurm_rsmi_array.sh
 ```
 
-Then run evaluation on node-local scratch:
+Then submit the generated evaluation array script:
 
 ```bash
 EXPERIMENT_CONFIG="${CONFIG_PATH}" \
-sbatch Experiments/hq_server_farm_jobs.sh "${DATASET_NAME}" "${EXPERIMENT_NAME}"
+sbatch Experiments/slurm_evaluate_array.sh
 ```
 
-Keep `EXPERIMENT_CONFIG` set to the same config used by `create_tasklist.sh`, especially when using `small_experiment_config.json` or a custom config. The Slurm evaluation wrapper stages the dataset, trained RSMI files, and config to `$LOCAL_SCRATCH`. It writes per-task JSON files to `$LOCAL_SCRATCH/output/` and archives them into `Experiments/output/`.
+Keep `EXPERIMENT_CONFIG` set to the same config used by `create_tasklist.sh`, especially when using `small_experiment_config.json` or a custom config. The Slurm evaluation array reads data and writes results in the repository checkout directly; it does not stage data to node-local scratch or copy results back.
 
 ## Real Workloads
 

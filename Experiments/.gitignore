@@ -1,2 +1,13 @@
 hq-server
 dataset*
+build_evaluate.out
+hq_eval_tasks
+hq_tasks_evaluate
+hq_tasks_RSMI
+slurm_evaluate_array.sh
+slurm_rsmi_array.sh
+slurm-evaluate-*.out
+slurm-evaluate-*.err
+slurm-rsmi-*.out
+slurm-rsmi-*.err
+output/
