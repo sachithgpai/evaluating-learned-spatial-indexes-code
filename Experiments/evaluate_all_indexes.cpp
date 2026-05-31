@@ -252,7 +252,12 @@ int main(int argc, char* argv[]){
     shuffle_vector(datapoints, datapoint_shuffle_rng);
     shuffle_vector(countbased_queries, query_shuffle_rng);
 
-    vector<double_t> query_entropy;
+    struct QueryEntropyRow {
+        int data_entropy_id;
+        int query_entropy_id;
+        double_t entropy;
+    };
+    vector<QueryEntropyRow> query_entropy_rows;
     filesystem::path query_entropy_path = dataset_root / "queries" / "entropy_values";
     ifstream query_entropy_file(query_entropy_path,ios::in);
     if(!query_entropy_file.is_open()){
@@ -260,9 +265,15 @@ int main(int argc, char* argv[]){
         return 1;
     }
     while (query_entropy_file >> a >> b >>c)
-        query_entropy.push_back(c);
+        query_entropy_rows.push_back(
+            QueryEntropyRow{
+                static_cast<int>(llround(a)),
+                static_cast<int>(llround(b)),
+                c
+            }
+        );
     query_entropy_file.close();
-    if(query_entropy.empty()){
+    if(query_entropy_rows.empty()){
         cerr<<"Query entropy file is empty: "<<query_entropy_path<<endl;
         return 1;
     }
@@ -294,16 +305,22 @@ int main(int argc, char* argv[]){
             <<" configured query entropy variants."<<endl;
         return 1;
     }
-    size_t query_entropy_index =
-        static_cast<size_t>((data_ent_id - 1) * query_entropy_variants + query_ent_id - 1);
-    if(query_entropy_index >= query_entropy.size()){
-        cerr<<"Invalid query_ent_id "<<query_ent_id
-            <<" for "<<query_entropy_variants
-            <<" configured query entropy variants and "
-            <<query_entropy.size()<<" query entropy rows."<<endl;
+    bool query_entropy_found = false;
+    double_t query_entropy_value = 0.0;
+    for(const auto& row : query_entropy_rows){
+        if(row.data_entropy_id == data_ent_id && row.query_entropy_id == query_ent_id){
+            query_entropy_value = row.entropy;
+            query_entropy_found = true;
+            break;
+        }
+    }
+    if(!query_entropy_found){
+        cerr<<"Missing query entropy row for data_ent_id "<<data_ent_id
+            <<" and query_ent_id "<<query_ent_id
+            <<" in "<<query_entropy_path<<endl;
         return 1;
     }
-    log_json["query_entropy"] = query_entropy[query_entropy_index];
+    log_json["query_entropy"] = query_entropy_value;
     log_json["selectivity"] = selectivity;
     
     std::vector<json> list_of_results;

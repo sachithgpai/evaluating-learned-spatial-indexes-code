@@ -153,6 +153,9 @@ Pass `[experiment_name]` or set `EXPERIMENT_NAME` to use another profile.
 Set `EXPERIMENT_CONFIG=/path/to/experiment_config.json` if you want to generate tasks from a different config file.
 
 The generated task commands pass `EXPERIMENT_CONFIG` and `EXPERIMENT_NAME` to `evaluate_all_indexes.cpp`, so the evaluator uses the same selectivity tags and query entropy counts as the task list.
+For real validation profiles with `single_query_workload_per_sample: true`, `create_tasklist.sh`
+reads each sample's `queries/selected_workload.json` and creates evaluation tasks only for that
+sample's selected query entropy and selectivity.
 
 Set `EXPERIMENT_OUTPUT_DIR` to write evaluator result files outside the default `Experiments/<dataset_name>/ResultsFolder/`.
 Set `EXPERIMENT_RESULT_FILE` to override the optional `[result_file]` argument.

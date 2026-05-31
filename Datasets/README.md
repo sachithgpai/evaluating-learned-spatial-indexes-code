@@ -68,6 +68,17 @@ python3 Datasets/spatial_workload_generator.py real \
 
 Each real sample is written under `Datasets/dataset_real/<sample_id>/`.
 
+When the selected real experiment profile has `single_query_workload_per_sample: true`,
+the generator writes one randomly selected query workload per sample instead of the full
+query-entropy/selectivity grid. The selected pair is recorded in:
+
+```text
+Datasets/dataset_real/<sample_id>/queries/selected_workload.json
+```
+
+That JSON includes the selected `query_entropy_id`, normalized `query_entropy`,
+`selectivity_id`, `selectivity_tag`, and `target_fraction`.
+
 Use `--build-world-grid` when you want to rebuild the `.npz` count grid from parquet instead of reusing an existing one.
 
 Use `--experiment <name>` to select a different experiment profile from the config. If omitted, the generator uses `synthetic` for synthetic mode and `real` for real mode.

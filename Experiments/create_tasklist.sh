@@ -39,56 +39,134 @@ IFS=' ' read -r -a selectivities <<< "${config_lines[2]}"
 num_dataset_samples="${config_lines[3]}"
 num_data_entropy_variants="${config_lines[4]}"
 num_query_entropy_variants="${config_lines[5]}"
+single_query_workload_per_sample="${config_lines[6]:-0}"
 
 rm -f "${evaluate_tasks}" "${rsmi_tasks}"
 
-# Write one evaluation task for every configured data/query/selectivity/block-size combination.
 evaluation_task_id=0
-for ((data_ent_id = 1; data_ent_id <= num_data_entropy_variants; data_ent_id++)); do
+
+write_evaluation_task() {
+    local data_sample_num="$1"
+    local data_ent_id="$2"
+    local block_size="$3"
+    local query_ent_id="$4"
+    local selectivity_id="$5"
+    local result_file
+
+    ((++evaluation_task_id))
+    result_file="${evaluation_task_id}.jsonl"
+    {
+        printf '%q ' \
+            env \
+            "PROJECT_ROOT=${repo_root}" \
+            "EXPERIMENT_CONFIG=${config_path}" \
+            "EXPERIMENT_NAME=${experiment_name}" \
+            "${evaluate_bin}" \
+            "${dataset_name}" \
+            "${data_sample_num}" \
+            "${data_ent_id}" \
+            "${block_size}" \
+            "${query_ent_id}" \
+            "${selectivity_id}" \
+            "${result_file}"
+        printf '\n'
+    } >> "${evaluate_tasks}"
+}
+
+write_rsmi_task() {
+    local data_sample_num="$1"
+    local data_ent_id="$2"
+    local block_size="$3"
+
+    {
+        printf '%q ' \
+            env \
+            "PROJECT_ROOT=${repo_root}" \
+            "EXPERIMENT_CONFIG=${config_path}" \
+            "EXPERIMENT_NAME=${experiment_name}" \
+            python3 \
+            "${rsmi_script}" \
+            "${dataset_name}" \
+            "${data_sample_num}" \
+            "${data_ent_id}" \
+            "${block_size}"
+        printf '\n'
+    } >> "${rsmi_tasks}"
+}
+
+if [[ "${single_query_workload_per_sample}" == "1" ]]; then
+    # Validation real workloads generate one selected data/query pair per sample.
     for ((data_sample_num = 1; data_sample_num <= num_dataset_samples; data_sample_num++)); do
+        selected_workload_path="${repo_root}/Datasets/${dataset_name}/${data_sample_num}/queries/selected_workload.json"
+        if [[ ! -f "${selected_workload_path}" ]]; then
+            echo "Missing selected workload metadata: ${selected_workload_path}" >&2
+            echo "Generate the real dataset first with single_query_workload_per_sample enabled." >&2
+            exit 1
+        fi
+
+        selected_output="$(
+            python3 -c 'import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    workload = json.load(handle)
+for key in ("data_entropy_id", "query_entropy_id", "selectivity_id", "selectivity_tag"):
+    if key not in workload:
+        raise SystemExit(f"Missing {key} in {sys.argv[1]}")
+print(int(workload["data_entropy_id"]))
+print(int(workload["query_entropy_id"]))
+print(int(workload["selectivity_id"]))
+print(str(workload["selectivity_tag"]))' "${selected_workload_path}"
+        )"
+        mapfile -t selected_lines <<< "${selected_output}"
+        data_ent_id="${selected_lines[0]}"
+        query_ent_id="${selected_lines[1]}"
+        selectivity_id="${selected_lines[2]}"
+        selectivity_tag="${selected_lines[3]}"
+
+        if (( selectivity_id < 0 || selectivity_id >= ${#selectivities[@]} )); then
+            echo "Invalid selectivity_id ${selectivity_id} in ${selected_workload_path}" >&2
+            exit 1
+        fi
+        if (( query_ent_id < 1 || query_ent_id > num_query_entropy_variants )); then
+            echo "Invalid query_entropy_id ${query_ent_id} in ${selected_workload_path}" >&2
+            exit 1
+        fi
+        if [[ "${selectivities[${selectivity_id}]}" != "${selectivity_tag}" ]]; then
+            echo "Selected workload ${selected_workload_path} was generated with selectivity ${selectivity_tag}, but the current config has ${selectivities[${selectivity_id}]} at selectivity_id ${selectivity_id}." >&2
+            exit 1
+        fi
+
         for block_size in "${block_sizes[@]}"; do
-            for selectivity_id in "${!selectivities[@]}"; do
-                selectivity="${selectivities[${selectivity_id}]}"
-                for ((query_ent_id = 1; query_ent_id <= num_query_entropy_variants; query_ent_id++)); do
-                    ((++evaluation_task_id))
-                    result_file="${evaluation_task_id}.jsonl"
-                    {
-                        printf '%q ' \
-                            env \
-                            "PROJECT_ROOT=${repo_root}" \
-                            "EXPERIMENT_CONFIG=${config_path}" \
-                            "EXPERIMENT_NAME=${experiment_name}" \
-                            "${evaluate_bin}" \
-                            "${dataset_name}" \
+            write_evaluation_task \
+                "${data_sample_num}" \
+                "${data_ent_id}" \
+                "${block_size}" \
+                "${query_ent_id}" \
+                "${selectivity_id}"
+            write_rsmi_task "${data_sample_num}" "${data_ent_id}" "${block_size}"
+        done
+    done
+else
+    # Write one evaluation task for every configured data/query/selectivity/block-size combination.
+    for ((data_ent_id = 1; data_ent_id <= num_data_entropy_variants; data_ent_id++)); do
+        for ((data_sample_num = 1; data_sample_num <= num_dataset_samples; data_sample_num++)); do
+            for block_size in "${block_sizes[@]}"; do
+                for selectivity_id in "${!selectivities[@]}"; do
+                    for ((query_ent_id = 1; query_ent_id <= num_query_entropy_variants; query_ent_id++)); do
+                        write_evaluation_task \
                             "${data_sample_num}" \
                             "${data_ent_id}" \
                             "${block_size}" \
                             "${query_ent_id}" \
-                            "${selectivity_id}" \
-                            "${result_file}"
-                        printf '\n'
-                    } >> "${evaluate_tasks}"
+                            "${selectivity_id}"
+                    done
                 done
-            done
 
-            # RSMI is trained once per dataset entropy variant and block size.
-            {
-                printf '%q ' \
-                    env \
-                    "PROJECT_ROOT=${repo_root}" \
-                    "EXPERIMENT_CONFIG=${config_path}" \
-                    "EXPERIMENT_NAME=${experiment_name}" \
-                    python3 \
-                    "${rsmi_script}" \
-                    "${dataset_name}" \
-                    "${data_sample_num}" \
-                    "${data_ent_id}" \
-                    "${block_size}"
-                printf '\n'
-            } >> "${rsmi_tasks}"
+                # RSMI is trained once per dataset entropy variant and block size.
+                write_rsmi_task "${data_sample_num}" "${data_ent_id}" "${block_size}"
+            done
         done
     done
-done
+fi
 
 
 evaluation_task_count="$(wc -l < "${evaluate_tasks}" | tr -d '[:space:]')"

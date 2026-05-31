@@ -22,8 +22,8 @@
     },
     "real": {
       "seed": 42,
-      "n_queries": 200,
-      "num_samples": 5,
+      "n_queries": 1000,
+      "num_samples": 10,
       "num_query_scales": 5,
       "num_query_clusters": 5,
       "target_fractions": [
@@ -41,7 +41,8 @@
       "real_center_candidates": 2000,
       "center_grid_size": 256,
       "exact_refine_steps": 0,
-      "data_entropy_variants": 1
+      "data_entropy_variants": 1,
+      "single_query_workload_per_sample": true
     }
   },
   "evaluation": {

@@ -126,6 +126,7 @@ class GeneratorConfig:
     # Real-world KNN centroid generation
     real_knn_k: int = 512
     real_center_candidates: int = 2000
+    single_query_workload_per_sample: bool = False
 
     # Output / plotting
     plot_sample_limit: int = 100_000
@@ -941,7 +942,13 @@ class SpatialWorkloadGenerator:
     # Unified query generation
     # ------------------------------------------------------------------
 
-    def generate_other_queries(self, points: np.ndarray, mode: str) -> dict:
+    def generate_other_queries(
+        self,
+        points: np.ndarray,
+        mode: str,
+        query_entropy_ids: Optional[list[int]] = None,
+        target_fractions: Optional[list[float]] = None,
+    ) -> dict:
         density_grid = self.build_density_grid(
             points,
             grid_size=self.cfg.density_grid_size,
@@ -949,16 +956,35 @@ class SpatialWorkloadGenerator:
         prefix = self.build_prefix_sum(density_grid)
         cell_index = self.build_center_cell_index(points)
         uniform_entropy = self.entropy(self.rng.random((self.cfg.n_queries, 2)), nbins=32)
+        selected_query_entropy_ids = (
+            set(query_entropy_ids) if query_entropy_ids is not None else None
+        )
+        query_scale_items = [
+            (group_num, float(query_scale))
+            for group_num, query_scale in enumerate(self.query_scales, start=1)
+            if selected_query_entropy_ids is None
+            or group_num in selected_query_entropy_ids
+        ]
+        if not query_scale_items:
+            raise ValueError("No query scales selected for workload generation.")
+
+        workload_target_fractions = (
+            list(target_fractions)
+            if target_fractions is not None
+            else list(self.cfg.target_fractions)
+        )
+        if not workload_target_fractions:
+            raise ValueError("At least one target fraction is required.")
 
         payload: dict = {
             "mode": mode,
             "n_points": int(len(points)),
             "density_grid_size": int(self.cfg.density_grid_size),
-            "target_fractions": list(self.cfg.target_fractions),
+            "target_fractions": workload_target_fractions,
             "query_groups": [],
         }
 
-        for group_num, query_scale in enumerate(self.query_scales, start=1):
+        for group_num, query_scale in query_scale_items:
             if mode == "synthetic":
                 centers, center_meta = self.generate_synthetic_query_centers(
                     data_points=points,
@@ -993,7 +1019,7 @@ class SpatialWorkloadGenerator:
                 "query_meta_by_fraction": {},
             }
 
-            for frac in self.cfg.target_fractions:
+            for frac in workload_target_fractions:
                 target_count = max(1, int(round(len(points) * frac)))
                 area_queries = self.build_area_queries(centers, frac)
                 count_queries = np.empty((len(centers), 4), dtype=np.float64)
@@ -1048,6 +1074,60 @@ class SpatialWorkloadGenerator:
             payload["query_groups"].append(group)
 
         return payload
+
+    def select_real_validation_workload(self) -> tuple[int, float, int]:
+        query_entropy_id = int(self.rng.integers(1, len(self.query_scales) + 1))
+        selectivity_id = int(self.rng.integers(0, len(self.cfg.target_fractions)))
+        return (
+            query_entropy_id,
+            float(self.cfg.target_fractions[selectivity_id]),
+            selectivity_id,
+        )
+
+    def write_selected_workload_metadata(
+        self,
+        dataset_dir: Path,
+        data_entropy_id: int,
+        payload: dict,
+        selectivity_id: int,
+    ) -> None:
+        if len(payload["query_groups"]) != 1 or len(payload["target_fractions"]) != 1:
+            raise ValueError("Selected workload metadata requires exactly one query group and one selectivity.")
+
+        query_root = dataset_dir / "queries"
+        group = payload["query_groups"][0]
+        target_fraction = float(payload["target_fractions"][0])
+        selectivity_tag = self.frac_to_tag(target_fraction)
+        query_entropy_id = int(group["group_num"])
+        count_queries = group["count_queries_by_fraction"][target_fraction]
+        meta_rows = group["query_meta_by_fraction"][target_fraction]
+
+        self.save_json(
+            query_root / "selected_workload.json",
+            {
+                "data_entropy_id": int(data_entropy_id),
+                "query_entropy_id": query_entropy_id,
+                "query_entropy": float(group["normalized_entropy"]),
+                "query_scale": float(group["query_scale"]),
+                "selectivity_id": int(selectivity_id),
+                "selectivity_tag": selectivity_tag,
+                "target_fraction": target_fraction,
+                "target_count": int(meta_rows[0, 2]) if len(meta_rows) else 0,
+                "n_queries": int(len(count_queries)),
+                "countbased_query_file": (
+                    f"otherDist/{data_entropy_id}_{selectivity_tag}_"
+                    f"countbased_{query_entropy_id}"
+                ),
+                "areabased_query_file": (
+                    f"otherDist/{data_entropy_id}_{selectivity_tag}_"
+                    f"areabased_{query_entropy_id}"
+                ),
+                "query_centers_file": (
+                    f"otherDist/{data_entropy_id}_querycenters_"
+                    f"{query_entropy_id}.csv"
+                ),
+            },
+        )
 
     # ------------------------------------------------------------------
     # Writers
@@ -1278,13 +1358,34 @@ class SpatialWorkloadGenerator:
             metadata["entropy"] = data_entropy
             self.save_json(datapoint_root / "meta.json", metadata)
 
-            query_payload = self.generate_other_queries(points, mode="real")
+            if self.cfg.single_query_workload_per_sample:
+                (
+                    selected_query_entropy_id,
+                    selected_target_fraction,
+                    selected_selectivity_id,
+                ) = self.select_real_validation_workload()
+                query_payload = self.generate_other_queries(
+                    points,
+                    mode="real",
+                    query_entropy_ids=[selected_query_entropy_id],
+                    target_fractions=[selected_target_fraction],
+                )
+            else:
+                selected_selectivity_id = None
+                query_payload = self.generate_other_queries(points, mode="real")
             query_entropy_rows = self.write_other_queries(
                 dataset_dir,
                 1,
                 query_payload,
                 points,
             )
+            if self.cfg.single_query_workload_per_sample:
+                self.write_selected_workload_metadata(
+                    dataset_dir,
+                    data_entropy_id=1,
+                    payload=query_payload,
+                    selectivity_id=int(selected_selectivity_id),
+                )
 
             self.write_entropy_table(
                 datapoint_root / "entropy_values",
@@ -1481,6 +1582,11 @@ def main() -> None:
                 experiment_config,
                 "real_center_candidates",
                 default_cfg.real_center_candidates,
+            ),
+            single_query_workload_per_sample=config_value(
+                experiment_config,
+                "single_query_workload_per_sample",
+                default_cfg.single_query_workload_per_sample,
             ),
             center_grid_size=config_value(
                 experiment_config,

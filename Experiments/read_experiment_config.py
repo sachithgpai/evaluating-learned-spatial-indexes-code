@@ -8,6 +8,7 @@ Output format, one value per line:
 4. number of dataset samples
 5. number of data entropy variants
 6. number of query entropy variants
+7. single-query-workload-per-sample flag, 1 or 0
 """
 
 from __future__ import annotations
@@ -36,6 +37,15 @@ def selectivity_tags(target_fractions: list[Any]) -> list[str]:
         f"{int(round(float(fraction) * SELECTIVITY_SCALE)):05d}"
         for fraction in target_fractions
     ]
+
+
+def config_bool(config: dict[str, Any], key: str, fallback: bool = False) -> bool:
+    value = config.get(key, fallback)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -139,6 +149,7 @@ def main() -> None:
     print(num_dataset_samples)
     print(num_data_entropy_variants)
     print(num_query_entropy_variants)
+    print(1 if config_bool(experiment_config, "single_query_workload_per_sample") else 0)
 
 
 if __name__ == "__main__":
