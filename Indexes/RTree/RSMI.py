@@ -31,8 +31,7 @@ class RSMINode(torch.nn.Module):
         self.linear2 = torch.nn.Linear(64, num_classes)
 
     def forward(self, x):
-        # output = self.linear2(F.leaky_relu(self.linear1(x))) 
-        output = F.log_softmax(self.linear2(F.leaky_relu(self.linear1(x)))) # NLLTest
+        output = self.linear2(F.leaky_relu(self.linear1(x))) 
         return output
 
 
@@ -47,6 +46,21 @@ class TargetDatasetForRSMI(Dataset):
     def __getitem__(self,idx):
         return self.X[idx], self.y[idx]
 
+
+
+def WriteSTRSplitNode(datapoints,index_save_folder,page_size,tree_write_file,node_name_str,num_splits_per_dim,minx,miny,maxx,maxy):
+    num_boxes = num_splits_per_dim**2
+    prepared_datapoints = PrepareDataForTraining(datapoints.copy(),num_splits_per_dim)
+
+    child_nodes = []
+    for child_num in range(num_boxes)[::-1]:
+        child_datapoints = prepared_datapoints[prepared_datapoints[:,2]==child_num]
+        if child_datapoints.shape[0]>0:
+            child_nodes.append((child_num,child_datapoints))
+
+    tree_write_file.write('{} {:.9f} {:.9f} {:.9f} {:.9f}\n'.format(len(child_nodes),minx,miny,maxx,maxy))
+    for child_num, child_datapoints in child_nodes:
+        TrainRSMINode(child_datapoints,index_save_folder,page_size,tree_write_file,node_name_str+'_{}'.format(child_num))
 
 
 def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_name_str='0'):
@@ -68,22 +82,7 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
     ## Neural network training at the last layer is error-prone. At final level make STR-like splits
     if datapoints.shape[0]<=page_size*16:
         num_splits_per_dim = min(RSMI_SPLIT_CNT,np.ceil(np.sqrt(datapoints.shape[0]/(page_size))).astype(int))
-        num_boxes = num_splits_per_dim**2
-        prepared_datapoints = PrepareDataForTraining(datapoints,num_splits_per_dim)
-
-        tree_write_file.write('{} {:.9f} {:.9f} {:.9f} {:.9f}\n'.format(num_boxes,minx,miny,maxx,maxy))
-        # print(prepared_datapoints[:,2])
-        # input()
-
-
-        for child_num in range(num_boxes)[::-1]:
-            child_datapoints = prepared_datapoints[prepared_datapoints[:,2]==child_num]
-            # print('child_num',child_num)
-
-            if child_datapoints.shape[0]>0:
-                TrainRSMINode(child_datapoints,index_save_folder,page_size,tree_write_file,node_name_str+'_{}'.format(child_num))
-
-
+        WriteSTRSplitNode(datapoints,index_save_folder,page_size,tree_write_file,node_name_str,num_splits_per_dim,minx,miny,maxx,maxy)
         return
 
     
@@ -129,7 +128,7 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
         loss.backward()
         optimizer.step()
         scheduler.step()
-        hist.append(float(criterion(net(inp),out)))
+        hist.append(loss.item())
         optimizer.zero_grad()
 
     net.eval()
@@ -147,9 +146,10 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
 
 
     #split data points into groups 
-    pred = net(torch.from_numpy(datapoints[:,0:2].astype(np.float32)))
-    box = torch.argmax(pred, dim=1).int().reshape(-1)
-    actual_bincounts = torch.bincount(box,minlength=num_boxes).numpy()
+    with torch.no_grad():
+        pred = net(torch.from_numpy(datapoints[:,0:2].astype(np.float32)))
+        box = torch.argmax(pred, dim=1).numpy().astype(np.int64)
+    actual_bincounts = np.bincount(box,minlength=num_boxes)
 
     # np.savetxt(index_save_folder/(node_name_str+'_ACTUAL_bincounts.txt'),actual_bincounts,fmt='%d')
     del net
@@ -166,6 +166,10 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
 
     # print(' {} {:.9f} {:.9f} {:.9f} {:.9f}\n'.format(np.count_nonzero(actual_bincounts),*(np.min(datapoints[:,:2],axis=0)),*(np.max(datapoints[:,:2],axis=0))),actual_bincounts)
     
+    if np.count_nonzero(actual_bincounts)<=1:
+        WriteSTRSplitNode(datapoints,index_save_folder,page_size,tree_write_file,node_name_str,num_splits_per_dim,minx,miny,maxx,maxy)
+        return
+
     tree_write_file.write('{} {:.9f} {:.9f} {:.9f} {:.9f}\n'.format(np.count_nonzero(actual_bincounts),minx,miny,maxx,maxy))
 
 
