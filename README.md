@@ -1,7 +1,7 @@
 # Evaluating Learned Spatial Indexes
 
 This repository hosts the code of the article:
-"[Experiments & Analysis] Evaluating Learned Spatial Indexes" by Sachith Pai and Michael Mathioudakis, 2025.
+"[Experiments & Analysis] Evaluating Learned Spatial Indexes" by Sachith Pai, Michael Mathioudakis & Jun Yang, 2026.
 
 The repository contains the C++ index implementations, workload generators, and experiment scripts used to reproduce the results.
 
