@@ -129,7 +129,7 @@ Run both Slurm commands from `Experiments/`; the generated scripts use `SLURM_SU
 For parquet-backed real workloads and OSM conversion, see `Datasets/README.md`. The rest of the pipeline is the same: generate `Datasets/<dataset_name>/`, compile the evaluator, run `create_tasklist.sh <dataset_name> real`, train RSMI, then evaluate.
 
 ## Authors and acknowledgment
-The code is created and maintained by Sachith Pai (sachith.pai@helsinki.fi).
+The code is created and maintained by Sachith Pai (sachith.pai@helsinki.fi,sachithgpai@gmail.com).
 The work was supported by Michael Mathioudakis's Academy of Finland grants.
 
 
