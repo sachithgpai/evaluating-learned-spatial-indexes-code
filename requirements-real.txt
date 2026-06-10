@@ -1,0 +1,8 @@
+# Real-workload dependencies.
+#
+# Install this file when generating parquet-backed real workloads or converting
+# OpenStreetMap PBF files. It includes the synthetic experiment dependencies.
+-r requirements-synthetic.txt
+
+pyarrow==21.0.0
+osmium==4.2.0

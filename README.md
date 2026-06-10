@@ -28,7 +28,19 @@ For the synthetic pipeline:
 - A C++17 compiler such as `g++`
 - Python packages used by RSMI training: `torch`, `scipy`, `scikit-learn`, `matplotlib`, `seaborn`, and the `zCurve` module imported by `Indexes/RTree/RSMI.py`
 
-For real workloads, also install `pyarrow`. For OSM PBF conversion, also install `osmium`.
+Install the Python dependencies with:
+
+```bash
+python3 -m pip install -r requirements-synthetic.txt
+```
+
+For real workloads and OSM PBF conversion, install the extended requirements:
+
+```bash
+python3 -m pip install -r requirements-real.txt
+```
+
+The real requirements include the synthetic requirements, plus `pyarrow` and `osmium`.
 
 ## End-to-End Synthetic Pipeline
 
@@ -81,6 +93,31 @@ bash evaluate_line_n.sh 1
 Evaluation runs write JSONL results under `Experiments/<dataset_name>/ResultsFolder/`.
 Each evaluation task writes `<line_number>.jsonl`, where the line number is its row in `hq_eval_tasks`.
 Memory-mapped temporary blockstore files are created under `temp_blockstore/` and removed by the evaluator.
+
+## Plotting Results
+
+The plotting script lives in `Results/plot_results.py`. First combine the per-task
+JSONL files into `Results/<dataset_name>/Results.json`, then run the plotting script:
+
+The plotting script is designed for the full experiment configuration used by the
+paper. Small configurations are useful for pipeline checks, but some figures
+assume the full set of data-skew, query-skew, selectivity, and block-size settings.
+
+```bash
+DATASET_NAME="dataset_synthetic_full"
+
+mkdir -p "Results/${DATASET_NAME}"
+cat "Experiments/${DATASET_NAME}/ResultsFolder/"*.jsonl \
+  > "Results/${DATASET_NAME}/Results.json"
+
+python3 Results/plot_results.py \
+  --data-dir "Results/${DATASET_NAME}" \
+  --figures-dir "Results/${DATASET_NAME}/figures" \
+  --no-tex
+```
+
+The generated figures and derived result files are written under
+`Results/<dataset_name>/figures/`. See `Results/README.md` for more details.
 
 ### Quick Smoke Test
 
