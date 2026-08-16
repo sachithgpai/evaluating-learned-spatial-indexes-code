@@ -18,7 +18,7 @@ The repository contains the C++ index implementations, workload generators, and 
 - `small_experiment_config.json`
   Small configuration for smoke tests.
 - `run_all_experiment.sh`
-  Convenience script, run with `bash run_all_experiment.sh`, that generates the small synthetic workload, compiles the evaluator, and creates task lists. Run the generated task lists afterward to train and evaluate.
+  Convenience script, run with `bash run_all_experiment.sh`, that generates the full synthetic workload from `experiment_config.json` into `Datasets/dataset_synthetic/`, compiles the evaluator, and creates task lists. Run the generated task lists afterward to train and evaluate.
 
 ## Requirements
 
@@ -66,14 +66,14 @@ This creates:
 
 - `Experiments/hq_tasks_RSMI`
 - `Experiments/hq_eval_tasks`
-- `Experiments/hq_tasks_evaluate` compatibility copy
-- `Experiments/evaluate_line_n.sh`
-- `Experiments/slurm_evaluate_array.sh`
-- `Experiments/rsmi_line_n.sh`
 - `Experiments/slurm_rsmi_array.sh`
+- `Experiments/slurm_evaluate_array.sh`
 - `Experiments/<dataset_name>/TrainedIndexes/`
 - `Experiments/<dataset_name>/ResultsFolder/`
 - `temp_blockstore/`
+
+`Experiments/evaluate_line_n.sh` and `Experiments/rsmi_line_n.sh` are checked into the
+repository rather than generated; `create_tasklist.sh` only makes them executable.
 
 Train RSMI first, then run the evaluator. For a small local run, the task files are plain shell command lists:
 

@@ -10,9 +10,9 @@ It turns a generated dataset in `Datasets/<dataset_name>/...` into:
 ## Files
 
 - `create_tasklist.sh`
-  Generates `hq_eval_tasks`, `hq_tasks_evaluate` as a compatibility copy, `hq_tasks_RSMI`,
-  `slurm_rsmi_array.sh`, and `slurm_evaluate_array.sh`.
-  It also creates the expected output folders under `Experiments/<dataset_name>/`.
+  Generates `hq_eval_tasks`, `hq_tasks_RSMI`, `slurm_rsmi_array.sh`, and `slurm_evaluate_array.sh`.
+  It also creates the expected output folders under `Experiments/<dataset_name>/`,
+  and makes the checked-in `evaluate_line_n.sh` and `rsmi_line_n.sh` runners executable.
   It reads experiment sizes, selectivities, and block sizes from `EXPERIMENT_CONFIG`, or from `../experiment_config.json` when `EXPERIMENT_CONFIG` is not set.
 
 - `evaluate_line_n.sh`
@@ -82,15 +82,15 @@ EXPERIMENT_CONFIG="${CONFIG_PATH}" bash create_tasklist.sh "${DATASET_NAME}" "${
 This creates:
 
 - `hq_eval_tasks`
-- `hq_tasks_evaluate` compatibility copy
 - `hq_tasks_RSMI`
-- `evaluate_line_n.sh`
 - `slurm_evaluate_array.sh`
-- `rsmi_line_n.sh`
 - `slurm_rsmi_array.sh`
 - `Experiments/<dataset_name>/TrainedIndexes/`
 - `Experiments/<dataset_name>/ResultsFolder/`
 - `<repo>/temp_blockstore/`
+
+`evaluate_line_n.sh` and `rsmi_line_n.sh` are checked into the repository rather than
+generated; `create_tasklist.sh` only makes them executable.
 
 RSMI models must be trained before evaluation. The generated task files are plain shell command lists, so a smoke test can run them directly:
 
