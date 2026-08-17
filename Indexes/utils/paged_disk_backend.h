@@ -9,11 +9,13 @@
  * out of it a page at a time. Blocks map to contiguous runs of pages and never
  * share a page.
  *
- * Phase 2 scope: the writer, plus a deliberately unbuffered reader -- every
- * page access is its own pread, with no cache and no residency. That makes the
- * layout verifiable on its own, before any eviction logic exists to confuse a
- * failure. Phase 3 puts a BufferPool behind FetchPage() and starts filling in
- * StorageStats; nothing else about this class needs to move.
+ * Page accesses go through a BufferPool with a fixed frame budget, so the
+ * memory available to a scan is something we set rather than something the
+ * kernel decides, and every access is counted as a hit or a miss.
+ *
+ * `ReadPageRaw()` remains as an uncached path that bypasses the pool entirely.
+ * The tests use it to read the file *without* going through the thing under
+ * test, which is what makes a layout bug distinguishable from a caching bug.
  */
 
 #include <fcntl.h>
@@ -29,9 +31,39 @@
 #include <string>
 #include <vector>
 
+#include <algorithm>
+#include <cmath>
+#include <memory>
+
 #include"storage_backend.h"
 #include"page_layout.h"
+#include"buffer_pool.h"
 #include"sort_tools.h"
+
+
+/**
+ * Lower bound on the frame budget.
+ *
+ * `kBlock` reserves enough frames to hold the largest single block, so that a
+ * block fetch is atomic. That is a modelling choice, not a correctness one --
+ * Scan() pins one page at a time, so the pool is correct with a single frame.
+ *
+ * `kMinimal` exists because FLOOD and GRID create one block per grid cell with
+ * no size cap, so on skewed data `largest_block_pages` can be a large slice of
+ * the whole file. Under kBlock that would quietly turn a requested fraction of
+ * 0.001 into an effective 0.4 for those indexes alone. Whichever mode is used,
+ * FramesFloored() and EffectiveFraction() record what actually happened.
+ */
+enum class BufferPoolFloorMode { kBlock, kMinimal };
+
+
+/** Frame budget and eviction settings for the paged backend's pool. */
+struct BufferPoolConfig{
+    double fraction{1.0};                                    // of the store's own file size
+    BufferPoolFloorMode floor_mode{BufferPoolFloorMode::kBlock};
+    size_t slack_frames{2};
+    std::string policy{"LRU"};
+};
 
 
 /** True when the paged backend should be materialized at all. Off by default. */
@@ -49,8 +81,40 @@ inline bool KeepBlockstoreFiles(){
 
 class PagedDiskBackend: public PointStorageBackend{
     public:
-        explicit PagedDiskBackend(PageGeometry geometry = PageGeometry{})
-            : geometry_(geometry) {}
+        /**
+         * A pinned page, unpinned automatically when it goes out of scope.
+         *
+         * Pairing Pin/Unpin by hand is the kind of mistake that surfaces far from
+         * its cause: a leaked pin slowly starves the pool of victims until some
+         * later Pin throws "every frame is pinned". The guard makes the pairing
+         * impossible to get wrong, including when an exception unwinds mid-decode.
+         */
+        class PinnedPage{
+            public:
+                PinnedPage(BufferPool* pool, uint64_t page_id, const char* data)
+                    : pool_(pool), page_id_(page_id), data_(data) {}
+
+                PinnedPage(PinnedPage&& other) noexcept
+                    : pool_(other.pool_), page_id_(other.page_id_), data_(other.data_){
+                    other.pool_ = nullptr;
+                }
+
+                PinnedPage(const PinnedPage&) = delete;
+                PinnedPage& operator=(const PinnedPage&) = delete;
+
+                ~PinnedPage(){ if(pool_) pool_->Unpin(page_id_); }
+
+                const char* Data() const { return data_; }
+
+            private:
+                BufferPool* pool_;
+                uint64_t page_id_;
+                const char* data_;
+        };
+
+        explicit PagedDiskBackend(PageGeometry geometry = PageGeometry{},
+                                  BufferPoolConfig pool_config = BufferPoolConfig{})
+            : geometry_(geometry), pool_config_(pool_config) {}
 
         // Owns a file descriptor and a scratch file; copying would double-close both.
         PagedDiskBackend(const PagedDiskBackend&) = delete;
@@ -78,11 +142,13 @@ class PagedDiskBackend: public PointStorageBackend{
             page_count_.resize(counts.size());
 
             uint64_t next_page = 1;                        // page 0 is the header
+            largest_block_pages_ = 0;
             for(size_t block_id=0;block_id<counts.size();block_id++){
                 const size_t pages = geometry_.PagesForBlock(counts[block_id]);
                 first_page_[block_id] = next_page;
                 page_count_[block_id] = uint32_t(pages);
                 next_page += pages;
+                largest_block_pages_ = std::max(largest_block_pages_, pages);
             }
             total_data_pages_ = next_page - 1;
             file_bytes_ = (total_data_pages_ + 1)*geometry_.page_bytes_;
@@ -159,39 +225,97 @@ class PagedDiskBackend: public PointStorageBackend{
             }
 
             built_ = true;
+
+            //7. Size and open the buffer pool over the file we just wrote.
+            RebuildPool(pool_config_);
+        }
+
+        /**
+         * Re-open the pool with a different budget, leaving the file alone.
+         *
+         * Sweeping the fraction only changes how much may be resident, never the
+         * bytes on disk -- so a fraction sweep costs one pool rebuild per point,
+         * not a rewrite of the store.
+         */
+        void RebuildPool(const BufferPoolConfig& config){
+            if(!built_)
+                throw std::runtime_error("PagedDiskBackend::RebuildPool: Build() has not run");
+
+            pool_config_ = config;
+            const uint64_t total_pages = total_data_pages_ + 1;
+
+            uint64_t requested = uint64_t(std::floor(config.fraction*double(file_bytes_)/
+                                                     double(geometry_.page_bytes_)));
+            const uint64_t floor_frames =
+                (config.floor_mode == BufferPoolFloorMode::kBlock)
+                    ? uint64_t(largest_block_pages_) + uint64_t(config.slack_frames)
+                    : uint64_t(2);
+
+            uint64_t frames = requested;
+            if(frames < floor_frames) frames = floor_frames;
+            if(frames > total_pages)  frames = total_pages;
+            if(frames < 1)            frames = 1;
+
+            frames_floored_ = (frames > requested);
+            effective_fraction_ = double(frames)*double(geometry_.page_bytes_)/double(file_bytes_);
+
+            pool_ = std::unique_ptr<BufferPool>(
+                new BufferPool(fd_, geometry_.page_bytes_, size_t(frames),
+                               MakeReplacementPolicy(config.policy)));
+            stats_ = StorageStats{};
+        }
+
+        /** Evict everything, keeping the frames. Use before a cold-pass measurement. */
+        void ClearCache(){
+            if(pool_) pool_->Clear();
         }
 
         void Scan(Query& query, const std::vector<size_t>& block_ids, std::vector<Point>& result_vec) override {
-            if(!built_)
+            if(!built_ || !pool_)
                 throw std::runtime_error("PagedDiskBackend::Scan: Build() has not run");
-
-            if(scratch_page_.size() != geometry_.page_bytes_)
-                scratch_page_.resize(geometry_.page_bytes_);
 
             for(const size_t& block_id: block_ids){
                 size_t remaining = block_point_counts_[block_id];
                 if(!remaining)
                     continue;
+                stats_.blocks_scanned++;
 
                 uint64_t page_id = first_page_[block_id];
                 while(remaining){
                     const size_t here = std::min(remaining, geometry_.records_per_page_);
-                    const char* page = FetchPage(page_id);
+                    PinnedPage page = FetchPage(page_id);   // unpinned when it leaves scope
 
                     for(size_t r=0;r<here;r++){
-                        Point point = DecodeRecord(page + r*geometry_.record_bytes_);
+                        Point point = DecodeRecord(page.Data() + r*geometry_.record_bytes_);
                         if(query.CheckPointWithin(point))
                             result_vec.push_back(point);
                     }
 
+                    stats_.points_decoded += here;
                     remaining -= here;
                     page_id++;
                 }
             }
         }
 
-        const StorageStats& Stats() const override { return stats_; }
-        void ResetStats() override { stats_ = StorageStats{}; }
+        /** Backend counters, with the pool's page accounting merged in. */
+        const StorageStats& Stats() const override {
+            if(pool_){
+                const BufferPoolStats& pool_stats = pool_->Stats();
+                stats_.pages_requested = pool_stats.pages_requested;
+                stats_.page_hits       = pool_stats.page_hits;
+                stats_.page_misses     = pool_stats.page_misses;
+                stats_.bytes_read      = pool_stats.bytes_read;
+                stats_.evictions       = pool_stats.evictions;
+            }
+            return stats_;
+        }
+
+        void ResetStats() override {
+            stats_ = StorageStats{};
+            if(pool_) pool_->ResetStats();
+        }
+
         const char* Name() const override { return "paged"; }
 
         // ---- inspection surface, used by the tests and the file dumper ----
@@ -205,6 +329,19 @@ class PagedDiskBackend: public PointStorageBackend{
         uint64_t TotalPoints() const { return total_points_; }
         uint64_t FileBytes() const { return file_bytes_; }
         size_t BlockCount() const { return block_point_counts_.size(); }
+        size_t LargestBlockPages() const { return largest_block_pages_; }
+
+        // ---- buffer-pool budget, all of it worth logging alongside the counters ----
+
+        size_t PoolFrames() const { return pool_ ? pool_->FrameCount() : 0; }
+        size_t PoolBytes() const { return PoolFrames()*geometry_.page_bytes_; }
+        double RequestedFraction() const { return pool_config_.fraction; }
+        /** What the pool actually got, after the floor and ceiling were applied. */
+        double EffectiveFraction() const { return effective_fraction_; }
+        /** True when the floor overrode the requested fraction -- flag these points in plots. */
+        bool FramesFloored() const { return frames_floored_; }
+        const char* PolicyName() const { return pool_ ? pool_->PolicyName() : "none"; }
+        const BufferPool* Pool() const { return pool_.get(); }
         /** Bytes of directory metadata that must stay resident to find a page. */
         size_t DirectoryBytes() const {
             return first_page_.size()*sizeof(uint64_t) + page_count_.size()*sizeof(uint32_t);
@@ -237,17 +374,9 @@ class PagedDiskBackend: public PointStorageBackend{
         }
 
     private:
-        /**
-         * Hand back the contents of one page.
-         *
-         * Phase 2 reads it straight off the disk every time -- no cache, no
-         * residency, no accounting. Phase 3 replaces the body with a pool pin and
-         * starts recording hits and misses in stats_; the call site in Scan() does
-         * not change.
-         */
-        const char* FetchPage(uint64_t page_id){
-            ReadPageRaw(page_id, scratch_page_.data());
-            return scratch_page_.data();
+        /** Make one page resident and hand it back, pinned for the guard's lifetime. */
+        PinnedPage FetchPage(uint64_t page_id){
+            return PinnedPage(pool_.get(), page_id, pool_->Pin(page_id));
         }
 
         void WriteFully(const char* src, size_t bytes){
@@ -278,9 +407,14 @@ class PagedDiskBackend: public PointStorageBackend{
         uint64_t total_data_pages_{};
         uint64_t total_points_{};
         uint64_t file_bytes_{};
+        size_t largest_block_pages_{};
 
-        std::vector<char> scratch_page_;
-        StorageStats stats_;
+        BufferPoolConfig pool_config_;
+        std::unique_ptr<BufferPool> pool_;
+        bool frames_floored_{false};
+        double effective_fraction_{0.0};
+
+        mutable StorageStats stats_;   // mutable: Stats() folds in the pool's counters
 };
 
 

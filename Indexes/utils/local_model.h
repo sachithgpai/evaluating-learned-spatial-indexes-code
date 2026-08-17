@@ -110,12 +110,28 @@ class BlockStore{
          * modes explicitly.
          */
         void FilterPointsFromBlocksForQuery(Query &query,std::vector<size_t>& refined_blocks, std::vector<Point>& result_vec){
-            SetStorageMode(use_memory_mapped_data ? StorageMode::kMmap : StorageMode::kInMemory);
+            // The legacy flag only steers the mode for callers that never selected one
+            // explicitly. Without this guard the bool would silently override
+            // SetStorageMode() on every scan -- two sources of truth for the mode, and
+            // a run reported as one backend while actually running another.
+            if(!mode_pinned_)
+                ApplyStorageMode(use_memory_mapped_data ? StorageMode::kMmap : StorageMode::kInMemory);
             active_->Scan(query,refined_blocks,result_vec);
         }
 
-        /** Select which representation subsequent scans read from. */
+        /**
+         * Select which representation subsequent scans read from.
+         *
+         * Takes precedence over `use_memory_mapped_data` from here on; that flag
+         * disappears entirely once the evaluator selects modes explicitly.
+         */
         void SetStorageMode(StorageMode requested){
+            mode_pinned_ = true;
+            ApplyStorageMode(requested);
+        }
+
+        /** Point `active_` at the backend for `requested`. */
+        void ApplyStorageMode(StorageMode requested){
             if(requested == mode_)
                 return;
 
@@ -237,6 +253,7 @@ class BlockStore{
 
     private:
         StorageMode mode_{StorageMode::kInMemory};
+        bool mode_pinned_{false};      // an explicit SetStorageMode() disables the legacy flag
         std::unique_ptr<InMemoryBackend> mem_backend_;
         std::unique_ptr<MmapBackend> mmap_backend_;
         std::unique_ptr<PagedDiskBackend> paged_backend_;
