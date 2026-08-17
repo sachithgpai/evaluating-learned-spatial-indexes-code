@@ -6,10 +6,13 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <numeric>
 #include <cassert>
 #include <cstring>
 #include <cstdio>
+#include <filesystem>
+#include <stdexcept>
 
 #include"point.h"
 #include"query.h"
@@ -79,13 +82,14 @@ class BlockStore{
         std::vector<size_t> block_point_counts_;                        // Block sizes.
         
         //** Storage structures for a disk backed blockstore. **
-        PaddedPoint* flattened_block_list_;                           // when storing within a memory mapped structure use a flattened single list
+        PaddedPoint* flattened_block_list_{nullptr};                  // when storing within a memory mapped structure use a flattened single list
         std::vector<size_t> block_start_location_;
         std::vector<size_t> block_end_location_;
 
         std::fstream file_write_obj_;
-        std::string blockstore_filename_;   
-        size_t file_store_size_{}; 
+        std::string blockstore_filename_;
+        size_t file_store_size_{};                                    // number of points in the mapping
+        size_t file_store_bytes_{};                                   // length of the mapping, in bytes
 
         bool memory_mapped_data_created{};
         bool use_memory_mapped_data{};
@@ -93,9 +97,14 @@ class BlockStore{
 
         BlockStore(const std::string &out_filename=""){};
 
-        ~BlockStore() { 
+        // Copying would hand two objects the same mapping and filename, so both
+        // destructors would munmap the same pointer and unlink the same file.
+        BlockStore(const BlockStore&) = delete;
+        BlockStore& operator=(const BlockStore&) = delete;
+
+        ~BlockStore() {
             if(memory_mapped_data_created){
-                if (flattened_block_list_ && munmap(flattened_block_list_, file_store_size_))
+                if (flattened_block_list_ && munmap(flattened_block_list_, file_store_bytes_))
                     std::cerr << "munmap error " << std::string(strerror(errno));
                 std::cout<<"Deleteing blockstorefile "<<blockstore_filename_<<std::endl;
                 std::remove(blockstore_filename_.c_str());
@@ -235,13 +244,16 @@ class BlockStore{
             size_t block_count = temp_block_point_counts.size();
             std::vector<size_t> quantiles;
 
+            if(block_count == 0)
+                return std::vector<size_t>(6, 0);   // keep the array length stable for downstream plotting
+
             quantiles.push_back(temp_block_point_counts[size_t(block_count*0.1)]);
             quantiles.push_back(temp_block_point_counts[size_t(block_count*0.25)]);
             quantiles.push_back(temp_block_point_counts[size_t(block_count*0.5)]);
             quantiles.push_back(temp_block_point_counts[size_t(block_count*0.75)]);
             quantiles.push_back(temp_block_point_counts[size_t(block_count*0.9)]);
 
-            quantiles.push_back(size_t(std::accumulate(temp_block_point_counts.begin(), temp_block_point_counts.end(), 0)/block_count));
+            quantiles.push_back(std::accumulate(temp_block_point_counts.begin(), temp_block_point_counts.end(), size_t{0})/block_count);
             
             return quantiles;
             
@@ -249,15 +261,26 @@ class BlockStore{
 
         /** Finalize the block store into a memory-mapped, disk-backed layout. */
         void FinishedConstruction(){
-            memory_mapped_data_created = true;
             //1. open file write object.
             const char* temp_blockstore_dir = std::getenv("TEMP_BLOCKSTORE_DIR");
             std::string blockstore_dir =
                 (temp_blockstore_dir != nullptr && std::string(temp_blockstore_dir).size() > 0)
                     ? NormalizeProjectRoot(std::string(temp_blockstore_dir))
                     : PROJECT_ROOT + "temp_blockstore/";
+
+            file_store_size_ = std::accumulate(block_point_counts_.begin(), block_point_counts_.end(), size_t{0});
+            if(file_store_size_ == 0)
+                throw std::runtime_error("BlockStore::FinishedConstruction: refusing to map an empty block store");
+            file_store_bytes_ = file_store_size_*sizeof(PaddedPoint);
+
+            std::error_code dir_error;
+            std::filesystem::create_directories(blockstore_dir, dir_error);
+
             blockstore_filename_ = blockstore_dir+generate_random_alphanumeric_string(20);
             file_write_obj_ = std::fstream(blockstore_filename_, std::ios::out | std::ios::binary);
+            if(!file_write_obj_.is_open())
+                throw std::runtime_error("BlockStore::FinishedConstruction: cannot open "+blockstore_filename_+
+                                         " (TEMP_BLOCKSTORE_DIR missing or not writable)");
 
             //2. write all blocks to file write object. Also keep track of block_start and block_end locations.
 
@@ -274,10 +297,29 @@ class BlockStore{
 
             //3. close the file pointer and mmap file into array.
             file_write_obj_.close();
-            file_store_size_ = std::accumulate(block_point_counts_.begin(), block_point_counts_.end(), 0);
+            if(file_write_obj_.fail()){
+                std::remove(blockstore_filename_.c_str());
+                throw std::runtime_error("BlockStore::FinishedConstruction: failed writing "+blockstore_filename_+
+                                         " (out of disk space?)");
+            }
 
             auto fd = open(blockstore_filename_.c_str(), O_RDONLY);
-            flattened_block_list_ = (PaddedPoint *) mmap(nullptr, file_store_size_*sizeof(PaddedPoint), PROT_READ, MAP_SHARED, fd, 0);
+            if(fd < 0){
+                std::remove(blockstore_filename_.c_str());
+                throw std::runtime_error("BlockStore::FinishedConstruction: cannot reopen "+blockstore_filename_+
+                                         ": "+std::string(strerror(errno)));
+            }
+
+            void* mapping = mmap(nullptr, file_store_bytes_, PROT_READ, MAP_SHARED, fd, 0);
+            close(fd);                                 // the mapping holds its own reference to the file
+            if(mapping == MAP_FAILED){
+                std::remove(blockstore_filename_.c_str());
+                throw std::runtime_error("BlockStore::FinishedConstruction: mmap failed for "+blockstore_filename_+
+                                         ": "+std::string(strerror(errno)));
+            }
+
+            flattened_block_list_ = (PaddedPoint *) mapping;
+            memory_mapped_data_created = true;         // armed only once there is something to clean up
         }
 
 
