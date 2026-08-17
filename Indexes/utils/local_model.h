@@ -12,6 +12,7 @@
 #include"sort_tools.h"
 #include"storage_backend.h"
 #include"mmap_backend.h"
+#include"paged_disk_backend.h"
 
 
 /**
@@ -127,8 +128,9 @@ class BlockStore{
                     active_ = mmap_backend_.get();
                     break;
                 case StorageMode::kBufferPool:
-                    assert(false && "buffer-pool backend not wired up yet");
-                    return;
+                    assert(paged_backend_ && "ENABLE_PAGED_BACKEND=1 must be set before FinishedConstruction()");
+                    active_ = paged_backend_.get();
+                    break;
             }
             mode_ = requested;
         }
@@ -215,10 +217,20 @@ class BlockStore{
         void FinishedConstruction(){
             mmap_backend_ = std::make_unique<MmapBackend>();
             mmap_backend_->Build(block_list_, block_point_counts_);
+
+            // Off unless ENABLE_PAGED_BACKEND=1, so a default run writes exactly the
+            // files it always did.
+            if(PagedBackendEnabled()){
+                paged_backend_ = std::make_unique<PagedDiskBackend>();
+                paged_backend_->Build(block_list_, block_point_counts_);
+            }
         }
 
         /** The mmap backend, or nullptr before FinishedConstruction() has run. */
         const MmapBackend* MmapBackendPtr() const { return mmap_backend_.get(); }
+
+        /** The paged backend, or nullptr when it was not enabled. */
+        PagedDiskBackend* PagedBackendPtr() const { return paged_backend_.get(); }
 
 
         // **************************************
@@ -227,6 +239,7 @@ class BlockStore{
         StorageMode mode_{StorageMode::kInMemory};
         std::unique_ptr<InMemoryBackend> mem_backend_;
         std::unique_ptr<MmapBackend> mmap_backend_;
+        std::unique_ptr<PagedDiskBackend> paged_backend_;
         PointStorageBackend* active_{nullptr};
 };
 

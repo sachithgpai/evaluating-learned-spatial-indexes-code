@@ -15,9 +15,25 @@
 
 #include <vector>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 
 #include"point.h"
 #include"query.h"
+
+
+/**
+ * Directory the disk-backed stores write their scratch files into.
+ *
+ * `TEMP_BLOCKSTORE_DIR` when set (the experiment scripts point it at the repo's
+ * temp_blockstore/), otherwise a directory under PROJECT_ROOT.
+ */
+inline std::string ResolveBlockstoreDir(){
+    const char* temp_blockstore_dir = std::getenv("TEMP_BLOCKSTORE_DIR");
+    return (temp_blockstore_dir != nullptr && std::string(temp_blockstore_dir).size() > 0)
+               ? NormalizeProjectRoot(std::string(temp_blockstore_dir))
+               : PROJECT_ROOT + "temp_blockstore/";
+}
 
 
 /**

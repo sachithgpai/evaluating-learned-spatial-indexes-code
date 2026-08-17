@@ -55,11 +55,7 @@ class MmapBackend: public PointStorageBackend{
         /** Write every block to a temp file and map it read-only. */
         void Build(const std::vector<Block>& blocks, const std::vector<size_t>& counts) override {
             //1. open file write object.
-            const char* temp_blockstore_dir = std::getenv("TEMP_BLOCKSTORE_DIR");
-            std::string blockstore_dir =
-                (temp_blockstore_dir != nullptr && std::string(temp_blockstore_dir).size() > 0)
-                    ? NormalizeProjectRoot(std::string(temp_blockstore_dir))
-                    : PROJECT_ROOT + "temp_blockstore/";
+            std::string blockstore_dir = ResolveBlockstoreDir();
 
             file_store_size_ = std::accumulate(counts.begin(), counts.end(), size_t{0});
             if(file_store_size_ == 0)
