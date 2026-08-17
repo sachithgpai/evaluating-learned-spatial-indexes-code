@@ -61,16 +61,6 @@ class BoundingRectangle{
     }
 
 
-    /** Overload for the padded on-disk point layout. */
-    bool CheckPointWithin(const PaddedPoint& point){
-
-        bool result = true;
-        for(size_t i =0;i<Constants::DIM;i++)
-            result &= (point.elements_[i] >= low_.elements_[i] && point.elements_[i]<high_.elements_[i]);
-        
-        return result;
-    }
-
     /** Expand the bounds to span the full floating-point domain. */
     void SetToSpanWholeSpace(){
         std::fill_n(low_.elements_,Constants::DIM, std::numeric_limits<double_t>::min());

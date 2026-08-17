@@ -71,16 +71,4 @@ bool FullSortOrder(Point a,Point b,int *dim_order) {
 
 
 
-class PaddedPoint: public Point
-{
-    public:
-    char pad[128];
-
-    /** Copy a point into a cache-line-friendly padded layout. */
-    PaddedPoint(const Point &other):Point(other){}
-
-};
-
-
-
 #endif

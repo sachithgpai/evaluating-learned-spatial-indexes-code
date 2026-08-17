@@ -5,9 +5,12 @@
  * @file mmap_backend.h
  * @brief Disk-backed storage that leans on the OS page cache.
  *
- * Writes every point as a fixed 144-byte `PaddedPoint` into one flat file, then
- * maps the whole file read-only. Blocks are delimited by point offsets into
- * that flat array.
+ * Writes every point as a bare `Point` into one flat file, then maps the whole
+ * file read-only. Blocks are delimited by point offsets into that flat array.
+ *
+ * Records carry no payload padding: what lands on disk is exactly the
+ * coordinates. Modelling a larger tuple is the paged backend's job, via its
+ * runtime record width.
  *
  * Note what this backend can and cannot tell you: residency is entirely the
  * kernel's business, so there is no memory budget to set and no miss to count.
@@ -61,7 +64,7 @@ class MmapBackend: public PointStorageBackend{
             file_store_size_ = std::accumulate(counts.begin(), counts.end(), size_t{0});
             if(file_store_size_ == 0)
                 throw std::runtime_error("MmapBackend::Build: refusing to map an empty block store");
-            file_store_bytes_ = file_store_size_*sizeof(PaddedPoint);
+            file_store_bytes_ = file_store_size_*sizeof(Point);
 
             std::error_code dir_error;
             std::filesystem::create_directories(blockstore_dir, dir_error);
@@ -77,10 +80,8 @@ class MmapBackend: public PointStorageBackend{
             size_t running_block_end = 0;
             for(size_t block_id=0;block_id<blocks.size();block_id++){
                 block_start_location_.push_back(running_block_end);
-                for(auto pt: blocks[block_id].block_data_){
-                    PaddedPoint pd_pt(pt);
-                    file_write_obj_.write(reinterpret_cast<const char*>(&pd_pt), sizeof(PaddedPoint));
-                }
+                for(const Point& pt: blocks[block_id].block_data_)
+                    file_write_obj_.write(reinterpret_cast<const char*>(&pt), sizeof(Point));
                 running_block_end += counts[block_id];
                 block_end_location_.push_back(running_block_end);
             }
@@ -108,7 +109,7 @@ class MmapBackend: public PointStorageBackend{
                                          ": "+std::string(strerror(errno)));
             }
 
-            flattened_block_list_ = (PaddedPoint *) mapping;
+            flattened_block_list_ = (Point *) mapping;
             memory_mapped_data_created_ = true;        // armed only once there is something to clean up
         }
 
@@ -130,7 +131,7 @@ class MmapBackend: public PointStorageBackend{
         size_t MappingBytes() const { return file_store_bytes_; }
 
     private:
-        PaddedPoint* flattened_block_list_{nullptr};   // the whole file, as one flat array of points
+        Point* flattened_block_list_{nullptr};         // the whole file, as one flat array of points
         std::vector<size_t> block_start_location_;
         std::vector<size_t> block_end_location_;
 
