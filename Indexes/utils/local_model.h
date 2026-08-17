@@ -29,10 +29,6 @@ class BlockStore{
         std::vector<BoundingRectangle> block_mbrs_;                     // MBRs for each block. Metadata that is usually stored in memory.
         std::vector<size_t> block_point_counts_;                        // Block sizes.
 
-        // Legacy mode switch, still written directly by the evaluator. Superseded by
-        // SetStorageMode(); removed once the evaluator selects modes explicitly.
-        bool use_memory_mapped_data{};
-
         BlockStore(const std::string &out_filename="")
             : mem_backend_(new InMemoryBackend(block_list_, block_point_counts_)){
             active_ = mem_backend_.get();
@@ -102,36 +98,13 @@ class BlockStore{
             block_list_[local_block_id].CopyAllPointsIntoResult(result);
             return result;
         }
-        /**
-         * Scan the supplied blocks and append matching points into `result_vec`.
-         *
-         * Dispatches to whichever backend is active. The `use_memory_mapped_data`
-         * translation keeps the legacy flag working until the evaluator selects
-         * modes explicitly.
-         */
+        /** Scan the supplied blocks and append matching points into `result_vec`. */
         void FilterPointsFromBlocksForQuery(Query &query,std::vector<size_t>& refined_blocks, std::vector<Point>& result_vec){
-            // The legacy flag only steers the mode for callers that never selected one
-            // explicitly. Without this guard the bool would silently override
-            // SetStorageMode() on every scan -- two sources of truth for the mode, and
-            // a run reported as one backend while actually running another.
-            if(!mode_pinned_)
-                ApplyStorageMode(use_memory_mapped_data ? StorageMode::kMmap : StorageMode::kInMemory);
             active_->Scan(query,refined_blocks,result_vec);
         }
 
-        /**
-         * Select which representation subsequent scans read from.
-         *
-         * Takes precedence over `use_memory_mapped_data` from here on; that flag
-         * disappears entirely once the evaluator selects modes explicitly.
-         */
+        /** Select which representation subsequent scans read from. */
         void SetStorageMode(StorageMode requested){
-            mode_pinned_ = true;
-            ApplyStorageMode(requested);
-        }
-
-        /** Point `active_` at the backend for `requested`. */
-        void ApplyStorageMode(StorageMode requested){
             if(requested == mode_)
                 return;
 
@@ -187,9 +160,53 @@ class BlockStore{
             return points_in_exact_ranges;
         }
 
-        /** Return the number of blocks currently stored. */
-        size_t NumOfBlocks(){
-            return block_list_.size();
+        /**
+         * Return the number of blocks currently stored.
+         *
+         * Counted from the metadata rather than from `block_list_`, so the answer
+         * survives ReleaseInMemoryBlocks().
+         */
+        size_t NumOfBlocks() const {
+            return block_point_counts_.size();
+        }
+
+        /**
+         * Free the in-memory point data, keeping only the metadata.
+         *
+         * Until this runs, a "disk-backed" measurement is taken with the whole
+         * dataset also resident in RAM, which makes any memory-budget claim
+         * fictional. Call it once the disk backends are built and the in-memory
+         * pass is finished.
+         *
+         * `block_mbrs_` and `block_point_counts_` deliberately stay: those are the
+         * index metadata a real system also keeps resident, and the paged backend
+         * needs the counts to size each block's final page.
+         */
+        void ReleaseInMemoryBlocks(){
+            if(mode_ == StorageMode::kInMemory)
+                return;                                  // would pull the ground out from under the active backend
+            if(!mmap_backend_ && !paged_backend_)
+                return;                                  // no disk copy exists to fall back on
+
+            // swap-with-empty, not clear(): clear() destroys the elements but keeps the
+            // outer vector's capacity allocated.
+            std::vector<Block>().swap(block_list_);
+
+            // The mapping's resident pages count against RSS too, so leaving it in
+            // place would keep the memory claim false in a way nothing inside the
+            // process can see.
+            if(mmap_backend_)
+                mmap_backend_->Release();
+
+            blocks_released_ = true;
+        }
+
+        bool BlocksReleased() const { return blocks_released_; }
+
+        /** Bytes of per-block metadata that stay resident regardless of backend. */
+        size_t MetadataBytes() const {
+            return block_mbrs_.size()*sizeof(BoundingRectangle) +
+                   block_point_counts_.size()*sizeof(size_t);
         }
 
 
@@ -237,7 +254,7 @@ class BlockStore{
             // Off unless ENABLE_PAGED_BACKEND=1, so a default run writes exactly the
             // files it always did.
             if(PagedBackendEnabled()){
-                paged_backend_ = std::make_unique<PagedDiskBackend>();
+                paged_backend_ = std::make_unique<PagedDiskBackend>(PagedGeometryFromEnv());
                 paged_backend_->Build(block_list_, block_point_counts_);
             }
         }
@@ -253,7 +270,7 @@ class BlockStore{
 
     private:
         StorageMode mode_{StorageMode::kInMemory};
-        bool mode_pinned_{false};      // an explicit SetStorageMode() disables the legacy flag
+        bool blocks_released_{false};
         std::unique_ptr<InMemoryBackend> mem_backend_;
         std::unique_ptr<MmapBackend> mmap_backend_;
         std::unique_ptr<PagedDiskBackend> paged_backend_;

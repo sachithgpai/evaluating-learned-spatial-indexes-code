@@ -78,6 +78,28 @@ inline bool KeepBlockstoreFiles(){
     return flag != nullptr && std::string(flag) == "1";
 }
 
+/** Read a size_t from the environment, falling back to `fallback` when unset or unparsable. */
+inline size_t EnvSizeT(const char* name, size_t fallback){
+    const char* raw = std::getenv(name);
+    if(raw == nullptr || std::string(raw).empty())
+        return fallback;
+    try { return size_t(std::stoull(raw)); }
+    catch(const std::exception&){
+        throw std::runtime_error(std::string(name)+": cannot parse '"+raw+"' as a number");
+    }
+}
+
+/**
+ * Page geometry for this run, from PAGE_BYTES / RECORD_BYTES.
+ *
+ * Defaults reproduce the built-in geometry, so an unset environment behaves
+ * exactly as the constants do.
+ */
+inline PageGeometry PagedGeometryFromEnv(){
+    return PageGeometry(EnvSizeT("PAGE_BYTES", kDefaultPageBytes),
+                        EnvSizeT("RECORD_BYTES", kDefaultRecordBytes));
+}
+
 
 class PagedDiskBackend: public PointStorageBackend{
     public:

@@ -60,6 +60,211 @@ filesystem::path configured_output_dir(const string& dataset_folder_name) {
     return filesystem::path(PROJECT_ROOT) / "Experiments" / dataset_folder_name / "ResultsFolder";
 }
 
+// ===================== Storage-backend measurement passes =====================
+//
+// Every index section used to carry its own copy of the disk-backed timing loop.
+// They now share RunStoragePasses() below; see phase4-evaluator-integration.md.
+
+/** Frame budget and pass settings, read once from the environment. */
+struct StoragePassConfig{
+    vector<double> fractions{1.0, 0.25, 0.05, 0.01, 0.001};
+    BufferPoolFloorMode floor_mode{BufferPoolFloorMode::kBlock};
+    string policy{"LRU"};
+    bool release_blocks{true};
+    bool verify{false};
+};
+
+static bool EnvFlag(const char* name, bool fallback){
+    const char* raw = getenv(name);
+    if(raw == nullptr || string(raw).empty()) return fallback;
+    return string(raw) == "1" || string(raw) == "true";
+}
+
+static StoragePassConfig LoadStoragePassConfig(){
+    StoragePassConfig config;
+
+    const char* fractions = getenv("BUFFER_POOL_FRACTIONS");
+    if(fractions != nullptr && string(fractions).size() > 0){
+        config.fractions.clear();
+        stringstream stream(fractions);
+        string field;
+        while(getline(stream, field, ','))
+            if(!field.empty()) config.fractions.push_back(stod(field));
+        if(config.fractions.empty())
+            throw runtime_error("BUFFER_POOL_FRACTIONS is set but parsed to nothing");
+    }
+
+    const char* floor_mode = getenv("BUFFER_POOL_FLOOR_MODE");
+    if(floor_mode != nullptr && string(floor_mode) == "minimal")
+        config.floor_mode = BufferPoolFloorMode::kMinimal;
+
+    const char* policy = getenv("BUFFER_POOL_POLICY");
+    if(policy != nullptr && string(policy).size() > 0) config.policy = string(policy);
+
+    config.release_blocks = EnvFlag("BUFFER_POOL_RELEASE_BLOCKS", true);
+    config.verify         = EnvFlag("VERIFY_BACKENDS", false);
+    return config;
+}
+
+/** FNV-1a over the raw coordinate bytes: catches reordering, not just size drift. */
+static uint64_t FingerprintPoints(uint64_t hash, const vector<Point>& points){
+    for(const Point& point: points){
+        const unsigned char* bytes = reinterpret_cast<const unsigned char*>(point.elements_);
+        for(size_t i=0;i<sizeof(double_t)*Constants::DIM;i++){
+            hash ^= bytes[i];
+            hash *= 1099511628211ULL;
+        }
+    }
+    return hash;
+}
+
+/** Copy the keys that let a bp_ row be joined back to its results row. */
+static void CopyJoinKeys(const json& log_json, json& row){
+    for(const char* key: {"model","block_size","data_sample_num","dataset_entropy_id",
+                          "query_entropy_id","selectivity","area_or_count_based","result_size"})
+        if(log_json.contains(key)) row[key] = log_json[key];
+}
+
+/**
+ * Run every disk-backed measurement for one index.
+ *
+ * `run_one(i, out)` executes query i and leaves its results in `out`. It takes the
+ * output vector by reference rather than returning it so the timed loop keeps the
+ * copy-assign the original code had -- returning would elide into a move and shift
+ * the latency baseline away from previously collected numbers.
+ *
+ * Writes the existing disk_backed_* keys into `log_json`, and one row per budget
+ * fraction into `bp_rows`.
+ */
+template <typename RunOne>
+void RunStoragePasses(BlockStore& store, size_t query_count, RunOne&& run_one,
+                      json& log_json, vector<json>& bp_rows, const StoragePassConfig& config){
+    vector<Point> result_vec;
+
+    // ---- 1. mmap pass: the pre-existing disk_backed_* keys, unchanged ----
+    store.SetStorageMode(StorageMode::kMmap);
+    size_t disk_backed_result_size = 0;
+    auto eval_start = chrono::high_resolution_clock::now();
+    for(size_t i=0;i<query_count;i++){
+        run_one(i, result_vec);
+        disk_backed_result_size += result_vec.size();
+    }
+    auto eval_end = chrono::high_resolution_clock::now();
+
+    log_json["disk_backed_result_size"] = disk_backed_result_size;
+    log_json["disk_backed_query_latency"] =
+        chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/query_count;
+
+    PagedDiskBackend* paged = store.PagedBackendPtr();
+
+    // ---- 2. cross-backend verification, untimed and opt-in ----
+    // Must run before the release below, since it compares against the in-memory scan.
+    bool results_match = true;
+    if(config.verify){
+        const uint64_t kFnvOffset = 1469598103934665603ULL;
+        uint64_t fingerprints[3] = {kFnvOffset, kFnvOffset, kFnvOffset};
+        const StorageMode modes[3] = {StorageMode::kInMemory, StorageMode::kMmap, StorageMode::kBufferPool};
+
+        for(int m=0;m<(paged ? 3 : 2);m++){
+            store.SetStorageMode(modes[m]);
+            for(size_t i=0;i<query_count;i++){
+                run_one(i, result_vec);
+                fingerprints[m] = FingerprintPoints(fingerprints[m], result_vec);
+            }
+        }
+        results_match = (fingerprints[0] == fingerprints[1]) &&
+                        (!paged || fingerprints[0] == fingerprints[2]);
+        if(!results_match)
+            cerr<<"BACKEND MISMATCH for "<<log_json.value("model","?")
+                <<": in-memory="<<fingerprints[0]<<" mmap="<<fingerprints[1]
+                <<" paged="<<(paged ? to_string(fingerprints[2]) : string("n/a"))<<endl;
+        log_json["results_match"] = results_match;
+    }
+
+    if(!paged)
+        return;
+
+    // ---- 3. free the in-memory copy so the budget means something ----
+    store.SetStorageMode(StorageMode::kBufferPool);
+    if(config.release_blocks)
+        store.ReleaseInMemoryBlocks();
+
+    // ---- 4. one cold + one warm pass per budget fraction ----
+    for(double fraction: config.fractions){
+        BufferPoolConfig pool_config;
+        pool_config.fraction   = fraction;
+        pool_config.floor_mode = config.floor_mode;
+        pool_config.policy     = config.policy;
+        paged->RebuildPool(pool_config);
+
+        paged->ClearCache();
+        paged->ResetStats();
+        auto cold_start = chrono::high_resolution_clock::now();
+        for(size_t i=0;i<query_count;i++) run_one(i, result_vec);
+        auto cold_end = chrono::high_resolution_clock::now();
+        const StorageStats cold = paged->Stats();
+
+        paged->ResetStats();
+        size_t bp_result_size = 0;
+        auto warm_start = chrono::high_resolution_clock::now();
+        for(size_t i=0;i<query_count;i++){
+            run_one(i, result_vec);
+            bp_result_size += result_vec.size();
+        }
+        auto warm_end = chrono::high_resolution_clock::now();
+        const StorageStats warm = paged->Stats();
+
+        json row;
+        CopyJoinKeys(log_json, row);
+
+        row["storage_page_bytes"]        = paged->Geometry().page_bytes_;
+        row["storage_record_bytes"]      = paged->Geometry().record_bytes_;
+        row["storage_records_per_page"]  = paged->Geometry().records_per_page_;
+
+        row["bufferpool_fraction"]           = fraction;
+        row["bufferpool_frames"]             = paged->PoolFrames();
+        row["bufferpool_bytes"]              = paged->PoolBytes();
+        row["bufferpool_effective_fraction"] = paged->EffectiveFraction();
+        row["bufferpool_frames_floored"]     = paged->FramesFloored();
+        row["bufferpool_floor_mode"]         = (config.floor_mode == BufferPoolFloorMode::kBlock) ? "block" : "minimal";
+        row["bp_replacement_policy"]         = paged->PolicyName();
+        row["largest_block_pages"]           = paged->LargestBlockPages();
+
+        row["index_file_bytes"]            = paged->FileBytes();
+        row["index_total_pages"]           = paged->TotalDataPages()+1;
+        row["index_directory_bytes"]       = paged->DirectoryBytes();
+        row["index_metadata_bytes"]        = store.MetadataBytes();
+        row["number_blocks_in_blockstore"] = store.NumOfBlocks();
+        row["blocks_released"]             = store.BlocksReleased();
+
+        row["bp_result_size"] = bp_result_size;
+        row["results_match"]  = results_match;
+
+        row["bp_cold_query_latency"]   = chrono::duration_cast<chrono::nanoseconds>(cold_end-cold_start).count()/query_count;
+        row["bp_cold_pages_requested"] = cold.pages_requested;
+        row["bp_cold_page_misses"]     = cold.page_misses;
+        row["bp_cold_hit_rate"]        = cold.HitRate();
+        row["bp_cold_bytes_read"]      = cold.bytes_read;
+
+        row["bp_warm_query_latency"]   = chrono::duration_cast<chrono::nanoseconds>(warm_end-warm_start).count()/query_count;
+        row["bp_warm_pages_requested"] = warm.pages_requested;
+        row["bp_warm_page_misses"]     = warm.page_misses;
+        row["bp_warm_hit_rate"]        = warm.HitRate();
+        row["bp_warm_bytes_read"]      = warm.bytes_read;
+        row["bp_warm_evictions"]       = warm.evictions;
+        row["bp_warm_blocks_scanned"]  = warm.blocks_scanned;
+        row["bp_warm_points_decoded"]  = warm.points_decoded;
+
+        row["bp_pages_requested_per_query"] = double(warm.pages_requested)/double(query_count);
+        row["bp_page_misses_per_query"]     = double(warm.page_misses)/double(query_count);
+        row["bp_blocks_scanned_per_query"]  = double(warm.blocks_scanned)/double(query_count);
+
+        bp_rows.push_back(row);
+    }
+}
+// ==============================================================================
+
+
 json load_project_config() {
     string config_path = configured_experiment_path();
     ifstream config_file(config_path, ios::in);
@@ -325,6 +530,13 @@ int main(int argc, char* argv[]){
     
     std::vector<json> list_of_results;
 
+    // Buffer-pool rows go to their own file. They vary along bufferpool_fraction,
+    // which is not part of the grouping key prepare_results() uses in
+    // Results/plot_results.py -- putting them in the main results file would make
+    // it silently average five fractions into one row and shift every figure.
+    std::vector<json> bp_list_of_results;
+    const StoragePassConfig storage_pass_config = LoadStoragePassConfig();
+
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" WAZI Started"<<endl;
 
     {   //############# WAZI #################
@@ -373,25 +585,15 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = wazi_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = wazi_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = wazi_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
-        {
-            wazi_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = wazi_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(wazi_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = wazi_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
         list_of_results.push_back(log_json);
     }
 
@@ -445,25 +647,15 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = zindex_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = zindex_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = zindex_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
-        {
-            zindex_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = zindex_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(zindex_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = zindex_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
 
         list_of_results.push_back(log_json);
     }
@@ -539,23 +731,15 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = zmindex_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = zmindex_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = zmindex_obj.block_store_.QuantilesOfBlockSizes();
 
             std::cout<<"Starting Disk based queries"<<std::endl;
 
-            zmindex_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start2 = std::chrono::high_resolution_clock::now();
-            for(int i=0;i<countbased_queries.size();i++){
-                result_vec = zmindex_obj.RangeQuery(countbased_queries[i],query_lows[i],query_highs[i]); 
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end2 = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end2 - eval_start2).count()/countbased_queries.size();
+            RunStoragePasses(zmindex_obj.block_store_, countbased_queries.size(),
+                [&](size_t q_idx, vector<Point>& out){ out = zmindex_obj.RangeQuery(countbased_queries[q_idx],query_lows[q_idx],query_highs[q_idx]); },
+                log_json, bp_list_of_results, storage_pass_config);
         }
 
         list_of_results.push_back(log_json);
@@ -613,25 +797,15 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = unigrid_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = unigrid_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = unigrid_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
-        {
-            unigrid_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = unigrid_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(unigrid_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = unigrid_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
         list_of_results.push_back(log_json);
     }
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" GRID Finished"<<endl;
@@ -691,25 +865,15 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = flood_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = flood_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = flood_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
-        {
-            flood_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = flood_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(flood_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = flood_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
 
         list_of_results.push_back(log_json);
     }
@@ -762,24 +926,14 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = str_tree_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = str_tree_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = str_tree_obj.block_store_.QuantilesOfBlockSizes();
 
 
-            {
-                str_tree_obj.block_store_.use_memory_mapped_data=true;
-                size_t disk_backed_result_size=0;
-                auto eval_start = std::chrono::high_resolution_clock::now();
-                for(auto &query: countbased_queries){
-                    result_vec = str_tree_obj.RangeQuery(query);  
-                    disk_backed_result_size+=result_vec.size();
-                }
-                auto eval_end = std::chrono::high_resolution_clock::now();
-
-                log_json["disk_backed_result_size"]=disk_backed_result_size;
-                log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-            }
+            RunStoragePasses(str_tree_obj.block_store_, countbased_queries.size(),
+                [&](size_t q_idx, vector<Point>& out){ out = str_tree_obj.RangeQuery(countbased_queries[q_idx]); },
+                log_json, bp_list_of_results, storage_pass_config);
 
 
             list_of_results.push_back(log_json);
@@ -838,25 +992,15 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = rstar_tree_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = rstar_tree_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = rstar_tree_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
-        {
-            rstar_tree_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = rstar_tree_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(rstar_tree_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = rstar_tree_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
 
         list_of_results.push_back(log_json);
     }
@@ -914,26 +1058,16 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = cur_tree_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = cur_tree_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = cur_tree_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
 
-        {
-            cur_tree_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = cur_tree_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(cur_tree_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = cur_tree_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
 
         list_of_results.push_back(log_json);
     }
@@ -991,26 +1125,16 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = rw_tree_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = rw_tree_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = rw_tree_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
 
-        {
-            rw_tree_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = rw_tree_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(rw_tree_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = rw_tree_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
         list_of_results.push_back(log_json);
     }
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RW Finished"<<endl;
@@ -1068,24 +1192,14 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = rsmi_tree_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = rsmi_tree_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = rsmi_tree_obj.block_store_.QuantilesOfBlockSizes();
 
         }
-        {
-            rsmi_tree_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = rsmi_tree_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(rsmi_tree_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = rsmi_tree_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
         list_of_results.push_back(log_json);        
     }
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSMI Finished"<<endl;
@@ -1143,26 +1257,16 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = kd_tree_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = kd_tree_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = kd_tree_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
 
-        {
-            kd_tree_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = kd_tree_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(kd_tree_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = kd_tree_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
 
         list_of_results.push_back(log_json);
     }
@@ -1226,25 +1330,15 @@ int main(int argc, char* argv[]){
 
             log_json["refinement_latency"] = chrono::duration_cast<chrono::nanoseconds>(refinement_end - refinement_start).count()/countbased_queries.size();
             log_json["number_of_refined_blocks"] = number_of_refined_blocks/countbased_queries.size();
-            log_json["number_blocks_in_blockstore"] = qd_tree_obj.block_store_.block_list_.size();
+            log_json["number_blocks_in_blockstore"] = qd_tree_obj.block_store_.NumOfBlocks();
             log_json["number_of_points_scanned"] = number_of_points_scanned/countbased_queries.size();
             log_json["block_size_quantiles"] = qd_tree_obj.block_store_.QuantilesOfBlockSizes();
 
         }
 
-        {
-            qd_tree_obj.block_store_.use_memory_mapped_data=true;
-            size_t disk_backed_result_size=0;
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            for(auto &query: countbased_queries){
-                result_vec = qd_tree_obj.RangeQuery(query);  
-                disk_backed_result_size+=result_vec.size();
-            }
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
-            log_json["disk_backed_result_size"]=disk_backed_result_size;
-            log_json["disk_backed_query_latency"] = chrono::duration_cast<chrono::nanoseconds>(eval_end - eval_start).count()/countbased_queries.size();
-        }
+        RunStoragePasses(qd_tree_obj.block_store_, countbased_queries.size(),
+            [&](size_t q_idx, vector<Point>& out){ out = qd_tree_obj.RangeQuery(countbased_queries[q_idx]); },
+            log_json, bp_list_of_results, storage_pass_config);
         list_of_results.push_back(log_json);
     }
 
@@ -1259,5 +1353,15 @@ int main(int argc, char* argv[]){
     for(auto& result_json: list_of_results)
         result_file<<result_json<<"\n";
     result_file.close();
+
+    // Separate file, separate schema: <line>.jsonl keeps exactly the keys it always
+    // had, so the existing plotting path and archived comparisons are untouched.
+    if(!bp_list_of_results.empty()){
+        ofstream bp_result_file((result_dir / ("bp_" + line_num)).string(), ios_base::app);
+        for(auto& bp_json: bp_list_of_results)
+            bp_result_file<<bp_json<<"\n";
+        bp_result_file.close();
+        cout<<"Wrote "<<bp_list_of_results.size()<<" buffer-pool rows to bp_"<<line_num<<endl;
+    }
     return 0;
 }

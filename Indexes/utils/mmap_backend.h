@@ -109,7 +109,30 @@ class MmapBackend: public PointStorageBackend{
             memory_mapped_data_created_ = true;        // armed only once there is something to clean up
         }
 
+        /**
+         * Drop the mapping early, before the object is destroyed.
+         *
+         * Used once the mmap measurement is finished so its resident pages stop
+         * counting against RSS while the buffer-pool passes run. Scanning
+         * afterwards is a programming error and throws rather than dereferencing a
+         * dangling pointer.
+         */
+        void Release(){
+            if(!memory_mapped_data_created_)
+                return;
+            if(flattened_block_list_ && munmap(flattened_block_list_, file_store_bytes_))
+                std::cerr << "munmap error " << std::string(strerror(errno));
+            flattened_block_list_ = nullptr;
+            std::cout<<"Deleteing blockstorefile "<<blockstore_filename_<<std::endl;
+            std::remove(blockstore_filename_.c_str());
+            memory_mapped_data_created_ = false;
+            released_ = true;
+        }
+
         void Scan(Query& query, const std::vector<size_t>& block_ids, std::vector<Point>& result_vec) override {
+            if(released_)
+                throw std::runtime_error("MmapBackend::Scan: the mapping was already released");
+
             for(const size_t& block_id: block_ids){
                 for(size_t offset=block_start_location_[block_id];offset<block_end_location_[block_id];offset++)
                     if(query.CheckPointWithin(*(flattened_block_list_+offset)))
@@ -137,6 +160,7 @@ class MmapBackend: public PointStorageBackend{
         size_t file_store_bytes_{};                    // length of the mapping, in bytes
 
         bool memory_mapped_data_created_{};
+        bool released_{false};
         StorageStats stats_;                           // stays zeroed; see the file comment
 };
 
