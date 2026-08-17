@@ -3,113 +3,44 @@
 
 
 #include <algorithm>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <numeric>
 #include <cassert>
-#include <cstring>
-#include <cstdio>
-#include <filesystem>
-#include <stdexcept>
+#include <memory>
 
 #include"point.h"
 #include"query.h"
 #include"sort_tools.h"
-
-
-/**
- * In-memory representation of one block/page of points.
- */
-class Block{
-    public:
-        std::vector<Point> block_data_;
-
-    
-        /** Materialize a block from an existing point vector. */
-        Block(std::vector<Point> & data):block_data_(data){}
-
-        /** Materialize a block from an iterator range. */
-        Block(const std::vector<Point>::iterator & it_data_begin, const std::vector<Point>::iterator & it_data_end){
-            // block_data_.reserve(BLOCK_SIZE+2);
-            // assert(std::distance(it_data_begin,it_data_end)<=BLOCK_SIZE);
-            block_data_.insert(block_data_.begin(),it_data_begin,it_data_end);
-        }
-
-        Block(){}
-
-        /** Replace the block contents with a new iterator range. */
-        void AssignPoints(std::vector<Point>::iterator it_data_begin,std::vector<Point>::iterator it_data_end){
-            block_data_.assign(it_data_begin,it_data_end);
-        }
-
-        /** Append points that satisfy `query` into `result_vec`. */
-        void FilterPointsForQuery(Query &query, std::vector<Point>& result_vec){
-            size_t block_size_here = block_data_.size();
-            for(auto& pnt: block_data_)
-                if(query.CheckPointWithin(pnt))
-                    result_vec.push_back(pnt);
-        }
-
-        /** Copy the full block contents into the caller-owned result buffer. */
-        void CopyAllPointsIntoResult(std::vector<Point>& result_vec){
-            result_vec.insert(result_vec.end(),block_data_.begin(),block_data_.end());
-        }
-
-        /** Append a single point to the block. */
-        void InsertPoint(Point& pnt){
-            block_data_.push_back(pnt);
-        }
-
-        /** Return the number of points currently stored in the block. */
-        size_t BlockDataSize(){
-            return block_data_.size();
-        }
-};
+#include"storage_backend.h"
+#include"mmap_backend.h"
 
 
 /**
  * Shared block store used by multiple index implementations.
  *
- * It tracks per-block MBR metadata in memory and can optionally materialize a
- * disk-backed, memory-mapped representation for scan experiments.
+ * It tracks per-block MBR metadata in memory always, and delegates the point
+ * data itself to a `PointStorageBackend` (see storage_backend.h). Reads go
+ * through `FilterPointsFromBlocksForQuery`; everything else here is build-time
+ * or metadata.
  */
 class BlockStore{
     public:
         std::vector<Block> block_list_;                                 // List of block objects
         std::vector<BoundingRectangle> block_mbrs_;                     // MBRs for each block. Metadata that is usually stored in memory.
         std::vector<size_t> block_point_counts_;                        // Block sizes.
-        
-        //** Storage structures for a disk backed blockstore. **
-        PaddedPoint* flattened_block_list_{nullptr};                  // when storing within a memory mapped structure use a flattened single list
-        std::vector<size_t> block_start_location_;
-        std::vector<size_t> block_end_location_;
 
-        std::fstream file_write_obj_;
-        std::string blockstore_filename_;
-        size_t file_store_size_{};                                    // number of points in the mapping
-        size_t file_store_bytes_{};                                   // length of the mapping, in bytes
-
-        bool memory_mapped_data_created{};
+        // Legacy mode switch, still written directly by the evaluator. Superseded by
+        // SetStorageMode(); removed once the evaluator selects modes explicitly.
         bool use_memory_mapped_data{};
-        // ***************************************************
 
-        BlockStore(const std::string &out_filename=""){};
+        BlockStore(const std::string &out_filename="")
+            : mem_backend_(new InMemoryBackend(block_list_, block_point_counts_)){
+            active_ = mem_backend_.get();
+        }
 
-        // Copying would hand two objects the same mapping and filename, so both
-        // destructors would munmap the same pointer and unlink the same file.
+        // Backends own a mapping and a temp file, and InMemoryBackend points back at
+        // our own vectors — so a BlockStore must never be copied or relocated.
         BlockStore(const BlockStore&) = delete;
         BlockStore& operator=(const BlockStore&) = delete;
-
-        ~BlockStore() {
-            if(memory_mapped_data_created){
-                if (flattened_block_list_ && munmap(flattened_block_list_, file_store_bytes_))
-                    std::cerr << "munmap error " << std::string(strerror(errno));
-                std::cout<<"Deleteing blockstorefile "<<blockstore_filename_<<std::endl;
-                std::remove(blockstore_filename_.c_str());
-            }
-        }
 
 
         /** Create an empty block and return its local identifier. */
@@ -173,24 +104,40 @@ class BlockStore{
         /**
          * Scan the supplied blocks and append matching points into `result_vec`.
          *
-         * When `use_memory_mapped_data` is enabled this reads from the mmap'd
-         * flattened representation; otherwise it scans the in-memory blocks.
+         * Dispatches to whichever backend is active. The `use_memory_mapped_data`
+         * translation keeps the legacy flag working until the evaluator selects
+         * modes explicitly.
          */
         void FilterPointsFromBlocksForQuery(Query &query,std::vector<size_t>& refined_blocks, std::vector<Point>& result_vec){
-
-            if(use_memory_mapped_data){
-                for(size_t& block_id: refined_blocks){
-                    for(size_t offset=block_start_location_[block_id];offset<block_end_location_[block_id];offset++)
-                        if(query.CheckPointWithin(*(flattened_block_list_+offset)))
-                            result_vec.emplace_back((flattened_block_list_+offset)->elements_[0],(flattened_block_list_+offset)->elements_[1]);
-                }
-            }
-            else 
-                for(size_t& block_id: refined_blocks){
-                    if(block_point_counts_[block_id])
-                        block_list_[block_id].FilterPointsForQuery(query,result_vec);
-                }
+            SetStorageMode(use_memory_mapped_data ? StorageMode::kMmap : StorageMode::kInMemory);
+            active_->Scan(query,refined_blocks,result_vec);
         }
+
+        /** Select which representation subsequent scans read from. */
+        void SetStorageMode(StorageMode requested){
+            if(requested == mode_)
+                return;
+
+            switch(requested){
+                case StorageMode::kInMemory:
+                    active_ = mem_backend_.get();
+                    break;
+                case StorageMode::kMmap:
+                    assert(mmap_backend_ && "FinishedConstruction() must run before switching to the mmap backend");
+                    active_ = mmap_backend_.get();
+                    break;
+                case StorageMode::kBufferPool:
+                    assert(false && "buffer-pool backend not wired up yet");
+                    return;
+            }
+            mode_ = requested;
+        }
+
+        StorageMode CurrentStorageMode() const { return mode_; }
+
+        /** I/O accounting for the active backend. */
+        const StorageStats& StorageStatsRef() const { return active_->Stats(); }
+        void ResetStorageStats(){ active_->ResetStats(); }
 
         /** Retain only those local blocks whose MBR overlaps the query. */
         void RefinedBlocksForQueryFromLocalBlocks(Query &query, std::vector<size_t>& local_blocks,std::vector<size_t>& refined_blocks){
@@ -259,74 +206,28 @@ class BlockStore{
             
         }
 
-        /** Finalize the block store into a memory-mapped, disk-backed layout. */
+        /**
+         * Finalize the block store: materialize the disk-backed representations.
+         *
+         * Called once, as the last step of each index's construction, while the
+         * in-memory blocks are still resident. The store is read-only afterwards.
+         */
         void FinishedConstruction(){
-            //1. open file write object.
-            const char* temp_blockstore_dir = std::getenv("TEMP_BLOCKSTORE_DIR");
-            std::string blockstore_dir =
-                (temp_blockstore_dir != nullptr && std::string(temp_blockstore_dir).size() > 0)
-                    ? NormalizeProjectRoot(std::string(temp_blockstore_dir))
-                    : PROJECT_ROOT + "temp_blockstore/";
-
-            file_store_size_ = std::accumulate(block_point_counts_.begin(), block_point_counts_.end(), size_t{0});
-            if(file_store_size_ == 0)
-                throw std::runtime_error("BlockStore::FinishedConstruction: refusing to map an empty block store");
-            file_store_bytes_ = file_store_size_*sizeof(PaddedPoint);
-
-            std::error_code dir_error;
-            std::filesystem::create_directories(blockstore_dir, dir_error);
-
-            blockstore_filename_ = blockstore_dir+generate_random_alphanumeric_string(20);
-            file_write_obj_ = std::fstream(blockstore_filename_, std::ios::out | std::ios::binary);
-            if(!file_write_obj_.is_open())
-                throw std::runtime_error("BlockStore::FinishedConstruction: cannot open "+blockstore_filename_+
-                                         " (TEMP_BLOCKSTORE_DIR missing or not writable)");
-
-            //2. write all blocks to file write object. Also keep track of block_start and block_end locations.
-
-            size_t running_block_end = 0;
-            for(size_t block_id=0;block_id<block_list_.size();block_id++){
-                block_start_location_.push_back(running_block_end);
-                for(auto pt: block_list_[block_id].block_data_){
-                    PaddedPoint pd_pt(pt);
-                    file_write_obj_.write(reinterpret_cast<const char*>(&pd_pt), sizeof(PaddedPoint));
-                }
-                running_block_end += block_point_counts_[block_id];
-                block_end_location_.push_back(running_block_end);
-            }
-
-            //3. close the file pointer and mmap file into array.
-            file_write_obj_.close();
-            if(file_write_obj_.fail()){
-                std::remove(blockstore_filename_.c_str());
-                throw std::runtime_error("BlockStore::FinishedConstruction: failed writing "+blockstore_filename_+
-                                         " (out of disk space?)");
-            }
-
-            auto fd = open(blockstore_filename_.c_str(), O_RDONLY);
-            if(fd < 0){
-                std::remove(blockstore_filename_.c_str());
-                throw std::runtime_error("BlockStore::FinishedConstruction: cannot reopen "+blockstore_filename_+
-                                         ": "+std::string(strerror(errno)));
-            }
-
-            void* mapping = mmap(nullptr, file_store_bytes_, PROT_READ, MAP_SHARED, fd, 0);
-            close(fd);                                 // the mapping holds its own reference to the file
-            if(mapping == MAP_FAILED){
-                std::remove(blockstore_filename_.c_str());
-                throw std::runtime_error("BlockStore::FinishedConstruction: mmap failed for "+blockstore_filename_+
-                                         ": "+std::string(strerror(errno)));
-            }
-
-            flattened_block_list_ = (PaddedPoint *) mapping;
-            memory_mapped_data_created = true;         // armed only once there is something to clean up
+            mmap_backend_ = std::make_unique<MmapBackend>();
+            mmap_backend_->Build(block_list_, block_point_counts_);
         }
 
-
+        /** The mmap backend, or nullptr before FinishedConstruction() has run. */
+        const MmapBackend* MmapBackendPtr() const { return mmap_backend_.get(); }
 
 
         // **************************************
 
+    private:
+        StorageMode mode_{StorageMode::kInMemory};
+        std::unique_ptr<InMemoryBackend> mem_backend_;
+        std::unique_ptr<MmapBackend> mmap_backend_;
+        PointStorageBackend* active_{nullptr};
 };
 
 
