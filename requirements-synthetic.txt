@@ -1,16 +1,16 @@
 # Synthetic experiment, RSMI training, and plotting dependencies.
 # A C++17 compiler such as g++ is also required, but
 # is not installed by pip.
-numpy==1.24.2
-torch==2.4.1
-scipy==1.10.0
-scikit-learn==1.5.2
-matplotlib==3.6.0
-seaborn==0.13.2
-pandas==2.3.3
-tqdm==4.64.1
-zCurve==0.0.4
+numpy
+torch
+scipy
+scikit-learn
+matplotlib
+seaborn
+pandas
+tqdm
+zCurve
 
 # Optional: plot_results.py uses colorcet when available, and falls back to a
 # seaborn palette otherwise.
-colorcet==3.1.0
+colorcet

@@ -4,5 +4,5 @@
 # OpenStreetMap PBF files. It includes the synthetic experiment dependencies.
 -r requirements-synthetic.txt
 
-pyarrow==21.0.0
-osmium==4.2.0
+pyarrow
+osmium

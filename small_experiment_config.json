@@ -4,52 +4,29 @@
   "experiments": {
     "synthetic": {
       "seed": 42,
-      "n_points": 100000,
-      "n_queries": 25,
+      "n_points": 8000000,
+      "n_queries": 1000,
       "num_datasets": 1,
       "num_query_scales": 2,
-      "num_query_clusters": 2,
-      "synthetic_num_clusters": 4,
+      "num_query_clusters": 5,
+      "synthetic_num_clusters": 10,
       "target_fractions": [
         0.001024,
         0.004096
       ],
-      "density_grid_size": 128,
+      "density_grid_size": 512,
       "exact_refine_steps": 0
-    },
-    "real": {
-      "seed": 42,
-      "n_queries": 25,
-      "num_samples": 1,
-      "num_query_scales": 2,
-      "num_query_clusters": 2,
-      "target_fractions": [
-        0.001024,
-        0.004096
-      ],
-      "density_grid_size": 128,
-      "real_target_points": 100000,
-      "approx_low": 150000,
-      "approx_high": 500000,
-      "real_knn_k": 128,
-      "real_center_candidates": 500,
-      "center_grid_size": 128,
-      "exact_refine_steps": 0,
-      "data_entropy_variants": 1
     }
   },
   "evaluation": {
     "block_sizes": [
-      128,
       512
     ],
     "enable_paged_backend": true,
     "buffer_pool_fractions": [
-      1.0,
       0.25,
       0.05,
-      0.01,
-      0.001
+      0.01
     ],
     "page_bytes": 4096,
     "record_bytes": 16

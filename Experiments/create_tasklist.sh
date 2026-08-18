@@ -200,7 +200,7 @@ cat > "${slurm_evaluate_script}" <<EOF
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4000
-#SBATCH --time=00:25:00
+#SBATCH --time=03:00:00
 #SBATCH --job-name=evaluate-indexes
 #SBATCH --array=1-${evaluation_task_count}
 #SBATCH --output=slurm-evaluate-%A_%a.out
@@ -225,8 +225,8 @@ cat > "${slurm_rsmi_script}" <<EOF
 #SBATCH --partition=test
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=4000
-#SBATCH --time=00:15:00
+#SBATCH --mem=8000
+#SBATCH --time=04:00:00
 #SBATCH --job-name=train-rsmi
 #SBATCH --array=1-${rsmi_task_count}
 #SBATCH --output=slurm-rsmi-%A_%a.out
