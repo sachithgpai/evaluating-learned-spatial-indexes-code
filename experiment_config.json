@@ -11,7 +11,7 @@
       "num_query_clusters": 5,
       "synthetic_num_clusters": 10,
       "target_fractions": [
-        0.000064,
+        6.4e-05,
         0.000256,
         0.001024,
         0.004096,
@@ -27,7 +27,7 @@
       "num_query_scales": 5,
       "num_query_clusters": 5,
       "target_fractions": [
-        0.000064,
+        6.4e-05,
         0.000256,
         0.001024,
         0.004096,
@@ -55,6 +55,16 @@
       1024,
       2048,
       4096
-    ]
+    ],
+    "enable_paged_backend": true,
+    "buffer_pool_fractions": [
+      1.0,
+      0.25,
+      0.05,
+      0.01,
+      0.001
+    ],
+    "page_bytes": 4096,
+    "record_bytes": 16
   }
 }

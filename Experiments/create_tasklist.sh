@@ -41,6 +41,13 @@ num_data_entropy_variants="${config_lines[4]}"
 num_query_entropy_variants="${config_lines[5]}"
 single_query_workload_per_sample="${config_lines[6]:-0}"
 
+# Storage-backend settings (lines 8-11). Defaults keep this script working against
+# a config file that predates the buffer pool.
+enable_paged_backend="${config_lines[7]:-0}"
+buffer_pool_fractions="${config_lines[8]:-1.0}"
+page_bytes="${config_lines[9]:-4096}"
+record_bytes="${config_lines[10]:-16}"
+
 rm -f "${evaluate_tasks}" "${rsmi_tasks}"
 
 evaluation_task_id=0
@@ -61,6 +68,10 @@ write_evaluation_task() {
             "PROJECT_ROOT=${repo_root}" \
             "EXPERIMENT_CONFIG=${config_path}" \
             "EXPERIMENT_NAME=${experiment_name}" \
+            "ENABLE_PAGED_BACKEND=${enable_paged_backend}" \
+            "BUFFER_POOL_FRACTIONS=${buffer_pool_fractions}" \
+            "PAGE_BYTES=${page_bytes}" \
+            "RECORD_BYTES=${record_bytes}" \
             "${evaluate_bin}" \
             "${dataset_name}" \
             "${data_sample_num}" \

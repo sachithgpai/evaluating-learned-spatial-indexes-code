@@ -9,6 +9,14 @@ Output format, one value per line:
 5. number of data entropy variants
 6. number of query entropy variants
 7. single-query-workload-per-sample flag, 1 or 0
+8. paged-backend enable flag, 1 or 0
+9. comma-separated buffer-pool fractions
+10. page size in bytes
+11. record size in bytes
+
+Lines 8-11 are appended rather than inserted: create_tasklist.sh reads these by
+index, so putting a new value anywhere but the end would silently shift every
+line below it.
 """
 
 from __future__ import annotations
@@ -20,6 +28,12 @@ from typing import Any
 
 
 SELECTIVITY_SCALE = 1_000_000
+
+# Defaults match the built-in constants, so a config predating the buffer pool
+# still produces a runnable task list.
+DEFAULT_BUFFER_POOL_FRACTIONS = [1.0, 0.25, 0.05, 0.01, 0.001]
+DEFAULT_PAGE_BYTES = 4096
+DEFAULT_RECORD_BYTES = 16
 
 
 def require_positive_int(config: dict[str, Any], key: str, context: str) -> int:
@@ -46,6 +60,28 @@ def config_bool(config: dict[str, Any], key: str, fallback: bool = False) -> boo
     if isinstance(value, str):
         return value.lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def require_positive_int_value(value: Any, key: str, context: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise SystemExit(f"'{key}' in {context} must be >= 1.")
+    return parsed
+
+
+def buffer_pool_fractions(evaluation_config: dict[str, Any]) -> list[float]:
+    """Validate the buffer-pool budget fractions and return them in sweep order."""
+    fractions = evaluation_config.get("buffer_pool_fractions", DEFAULT_BUFFER_POOL_FRACTIONS)
+    if not fractions:
+        raise SystemExit("'evaluation.buffer_pool_fractions' must not be empty.")
+
+    parsed = [float(fraction) for fraction in fractions]
+    for fraction in parsed:
+        if not 0.0 < fraction <= 1.0:
+            raise SystemExit(
+                f"'evaluation.buffer_pool_fractions' entries must be in (0, 1]; got {fraction}."
+            )
+    return parsed
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -150,6 +186,26 @@ def main() -> None:
     print(num_data_entropy_variants)
     print(num_query_entropy_variants)
     print(1 if config_bool(experiment_config, "single_query_workload_per_sample") else 0)
+
+    # Lines 8-11: storage-backend settings. The fraction sweep runs inside the
+    # evaluator binary, so this list is one env var rather than a task dimension --
+    # keeping the task count unchanged.
+    print(1 if config_bool(evaluation_config, "enable_paged_backend") else 0)
+    print(",".join(repr(fraction) for fraction in buffer_pool_fractions(evaluation_config)))
+    print(
+        require_positive_int_value(
+            evaluation_config.get("page_bytes", DEFAULT_PAGE_BYTES),
+            "page_bytes",
+            "evaluation",
+        )
+    )
+    print(
+        require_positive_int_value(
+            evaluation_config.get("record_bytes", DEFAULT_RECORD_BYTES),
+            "record_bytes",
+            "evaluation",
+        )
+    )
 
 
 if __name__ == "__main__":
