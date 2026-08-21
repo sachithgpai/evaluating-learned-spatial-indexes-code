@@ -37,6 +37,7 @@
 
 
 #include"../Indexes/utils/json.hpp"
+#include"../Indexes/utils/device_probe.h"
 
 
 
@@ -72,6 +73,12 @@ struct StoragePassConfig{
     string policy{"LRU"};
     bool release_blocks{true};
     bool verify{false};
+    bool direct_io{false};
+
+    // What one page miss costs on this node's storage, measured once per task.
+    // Logged with every row so a latency taken on a contended node is
+    // identifiable afterwards rather than merely suspected.
+    DeviceProbeResult device_probe;
 };
 
 static bool EnvFlag(const char* name, bool fallback){
@@ -103,6 +110,22 @@ static StoragePassConfig LoadStoragePassConfig(){
 
     config.release_blocks = EnvFlag("BUFFER_POOL_RELEASE_BLOCKS", true);
     config.verify         = EnvFlag("VERIFY_BACKENDS", false);
+    config.direct_io      = EnvFlag("BUFFER_POOL_DIRECT_IO", false);
+
+    // Defaults on exactly when direct I/O is on: with the page cache in the way
+    // a per-miss cost is not a device property and there is nothing to
+    // calibrate, but once misses reach the device the number is what makes them
+    // interpretable. Costs a few seconds, once per task.
+    if(EnvFlag("DEVICE_LATENCY_PROBE", config.direct_io)){
+        const size_t page_bytes = EnvSizeT("PAGE_BYTES", kDefaultPageBytes);
+        config.device_probe = ProbeBlockstoreDevice(page_bytes, config.direct_io);
+        if(!config.device_probe.ran)
+            cerr<<"device probe did not run: "<<config.device_probe.error<<endl;
+        else
+            cerr<<"device probe ("<<(config.direct_io ? "O_DIRECT" : "buffered")<<"): mean "
+                <<config.device_probe.mean_ns<<" ns/page, p50 "<<config.device_probe.p50_ns
+                <<", p99 "<<config.device_probe.p99_ns<<endl;
+    }
     return config;
 }
 
@@ -230,6 +253,17 @@ void RunStoragePasses(BlockStore& store, size_t query_count, RunOne&& run_one,
         row["bp_replacement_policy"]         = paged->PolicyName();
         row["largest_block_pages"]           = paged->LargestBlockPages();
 
+        // ---- what a miss actually cost on this node ----
+        row["bp_direct_io"]        = paged->DirectIo();
+        row["device_probe_ran"]    = config.device_probe.ran;
+        row["device_probe_direct"] = config.device_probe.direct;
+        if(config.device_probe.ran){
+            row["device_ns_per_page_mean"] = config.device_probe.mean_ns;
+            row["device_ns_per_page_p50"]  = config.device_probe.p50_ns;
+            row["device_ns_per_page_p90"]  = config.device_probe.p90_ns;
+            row["device_ns_per_page_p99"]  = config.device_probe.p99_ns;
+        }
+
         row["index_file_bytes"]            = paged->FileBytes();
         row["index_total_pages"]           = paged->TotalDataPages()+1;
         row["index_directory_bytes"]       = paged->DirectoryBytes();
@@ -238,7 +272,16 @@ void RunStoragePasses(BlockStore& store, size_t query_count, RunOne&& run_one,
         row["blocks_released"]             = store.BlocksReleased();
 
         row["bp_result_size"] = bp_result_size;
-        row["results_match"]  = results_match;
+
+        // Provenance, not just the verdict. `results_match` is initialised true and
+        // only ever assigned inside the `if(config.verify)` block above, so writing
+        // it unconditionally here reported a passed check on a check that never ran
+        // whenever VERIFY_BACKENDS was unset -- which is the default. Same shape as
+        // device_probe_ran above: the flag is always present, the value only when
+        // it means something.
+        row["backends_verified"] = config.verify;
+        if(config.verify)
+            row["results_match"] = results_match;
 
         row["bp_cold_query_latency"]   = chrono::duration_cast<chrono::nanoseconds>(cold_end-cold_start).count()/query_count;
         row["bp_cold_pages_requested"] = cold.pages_requested;
@@ -258,6 +301,18 @@ void RunStoragePasses(BlockStore& store, size_t query_count, RunOne&& run_one,
         row["bp_pages_requested_per_query"] = double(warm.pages_requested)/double(query_count);
         row["bp_page_misses_per_query"]     = double(warm.page_misses)/double(query_count);
         row["bp_blocks_scanned_per_query"]  = double(warm.blocks_scanned)/double(query_count);
+
+        // Attribute the warm pass's time over its misses, taking the in-memory
+        // pass as the zero-I/O baseline for everything that is not a page fetch.
+        // Under direct I/O this should land near device_ns_per_page_p50; if it
+        // does not, either the miss accounting or the read path is wrong, so it
+        // is worth logging even though it is derivable.
+        const double warm_latency = double(chrono::duration_cast<chrono::nanoseconds>(warm_end-warm_start).count())/double(query_count);
+        const double misses_per_query = double(warm.page_misses)/double(query_count);
+        const double compute_baseline = double(log_json.value("query_latency", 0));
+        row["bp_warm_ns_per_miss"] = (misses_per_query > 0.0)
+                                         ? (warm_latency - compute_baseline)/misses_per_query
+                                         : 0.0;
 
         bp_rows.push_back(row);
     }

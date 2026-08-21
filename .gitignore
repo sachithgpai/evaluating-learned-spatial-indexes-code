@@ -1,3 +1,6 @@
 .vscode/settings.json
 .venv
 Notes
+# compiled test/tool binaries
+Indexes/utils/tests/*.out
+Experiments/*.out

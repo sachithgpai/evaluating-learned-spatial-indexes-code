@@ -187,7 +187,7 @@ def main() -> None:
     print(num_query_entropy_variants)
     print(1 if config_bool(experiment_config, "single_query_workload_per_sample") else 0)
 
-    # Lines 8-11: storage-backend settings. The fraction sweep runs inside the
+    # Lines 8-12: storage-backend settings. The fraction sweep runs inside the
     # evaluator binary, so this list is one env var rather than a task dimension --
     # keeping the task count unchanged.
     print(1 if config_bool(evaluation_config, "enable_paged_backend") else 0)
@@ -206,6 +206,10 @@ def main() -> None:
             "evaluation",
         )
     )
+    # Line 12: bypass the OS page cache on the buffer pool's read path. Requires
+    # storage that accepts O_DIRECT -- point TEMP_BLOCKSTORE_DIR at node-local
+    # disk, since Lustre refuses direct reads below 4096 bytes.
+    print(1 if config_bool(evaluation_config, "direct_io") else 0)
 
 
 if __name__ == "__main__":

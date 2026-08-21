@@ -37,7 +37,16 @@ if [[ -z "${task_command}" ]]; then
     exit 1
 fi
 
-mkdir -p "${repo_root}/temp_blockstore"
+# Where the mmap and paged block stores are written.
+#
+# An inherited value wins, so a batch script can place the store on node-local
+# NVMe -- required for O_DIRECT, which Lustre refuses below 4096 bytes. Failing
+# that, fall back to ${TMPDIR} when the site provides one (on Roihu it is a
+# per-job NVMe area, created and removed automatically), and only then to the
+# historical location under the repo root.
+blockstore_dir="${TEMP_BLOCKSTORE_DIR:-${TMPDIR:+${TMPDIR}/blockstore}}"
+blockstore_dir="${blockstore_dir:-${repo_root}/temp_blockstore}"
+mkdir -p "${blockstore_dir}"
 
 eval "task_argv=(${task_command})"
 
@@ -70,7 +79,7 @@ if [[ "${task_argv[0]:-}" == "env" ]]; then
 
     set_env_assignment "PROJECT_ROOT" "${repo_root}"
     set_env_assignment "EXPERIMENT_RESULT_FILE" "${line_number}.jsonl"
-    set_env_assignment "TEMP_BLOCKSTORE_DIR" "${repo_root}/temp_blockstore"
+    set_env_assignment "TEMP_BLOCKSTORE_DIR" "${blockstore_dir}"
 
     task_argv=(
         env
@@ -82,7 +91,7 @@ else
         env
         "PROJECT_ROOT=${repo_root}"
         "EXPERIMENT_RESULT_FILE=${line_number}.jsonl"
-        "TEMP_BLOCKSTORE_DIR=${repo_root}/temp_blockstore"
+        "TEMP_BLOCKSTORE_DIR=${blockstore_dir}"
         "${task_argv[@]}"
     )
 fi

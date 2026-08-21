@@ -29,6 +29,7 @@
       0.01
     ],
     "page_bytes": 4096,
-    "record_bytes": 16
+    "record_bytes": 16,
+    "direct_io": true
   }
 }

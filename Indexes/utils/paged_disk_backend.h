@@ -13,6 +13,14 @@
  * memory available to a scan is something we set rather than something the
  * kernel decides, and every access is counted as a hit or a miss.
  *
+ * The pool reads through its own descriptor, separate from the one the writer
+ * used. With BUFFER_POOL_DIRECT_IO=1 that descriptor is opened O_DIRECT, which
+ * takes the OS page cache out of the read path: a miss becomes a real device
+ * transfer rather than a memcpy out of the kernel's own cache, and this pool
+ * becomes the only cache in the stack instead of the upper of two. Nothing
+ * about the pool itself changes -- same frames, same LRU, same counters. Only
+ * what a miss costs changes.
+ *
  * `ReadPageRaw()` remains as an uncached path that bypasses the pool entirely.
  * The tests use it to read the file *without* going through the thing under
  * test, which is what makes a layout bug distinguishable from a caching bug.
@@ -23,6 +31,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <numeric>
@@ -75,6 +84,18 @@ inline bool PagedBackendEnabled(){
 /** Debug escape hatch: keep the scratch file visible on disk instead of unlinking it. */
 inline bool KeepBlockstoreFiles(){
     const char* flag = std::getenv("KEEP_BLOCKSTORE_FILES");
+    return flag != nullptr && std::string(flag) == "1";
+}
+
+/**
+ * True when the pool's page reads should bypass the OS page cache.
+ *
+ * Off by default, so an unset environment reads exactly as it always did. When
+ * on, the pool's descriptor is opened O_DIRECT and every miss is a device
+ * read. See the note at the top of this file for what does and does not change.
+ */
+inline bool DirectIoEnabled(){
+    const char* flag = std::getenv("BUFFER_POOL_DIRECT_IO");
     return flag != nullptr && std::string(flag) == "1";
 }
 
@@ -143,6 +164,8 @@ class PagedDiskBackend: public PointStorageBackend{
         PagedDiskBackend& operator=(const PagedDiskBackend&) = delete;
 
         ~PagedDiskBackend() override {
+            if(read_fd_ >= 0)
+                close(read_fd_);
             if(fd_ >= 0)
                 close(fd_);
             // Only reachable when KEEP_BLOCKSTORE_FILES kept the name alive; the
@@ -221,16 +244,34 @@ class PagedDiskBackend: public PointStorageBackend{
                 }
             }
 
-            //5. Flush, so the preads below see the data rather than racing the writeback.
+            //5. Flush, so the reads below see the data rather than racing the writeback.
             if(fsync(fd_) != 0)
                 throw std::runtime_error("PagedDiskBackend::Build: fsync failed for "+blockstore_filename_+
                                          ": "+std::string(strerror(errno)));
 
-            //6. Unlink the file immediately, while keeping fd_ open.
+            //6. Open the descriptor the pool will read through.
+            //
+            // Separate from fd_ because the two halves want opposite things. The
+            // writer above streams whole pages sequentially, once, outside any
+            // measurement -- it is perfectly happy going through the page cache,
+            // and its buffer is not aligned for O_DIRECT anyway. The reader wants
+            // each miss to be a real device transfer. Doing this before the unlink
+            // below is not optional: afterwards there is no name left to open.
+            OpenReadDescriptor();
+
+            //7. Drop the pages the writer just left behind in the OS cache.
+            //
+            // They are a second copy of the whole store sitting in kernel memory.
+            // Harmless to correctness -- direct reads ignore them either way --
+            // but they occupy RAM that the memory-budget claim says we are not
+            // using. Advisory by definition, so a refusal here is not an error.
+            posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+
+            //8. Unlink the file immediately, while keeping the descriptors open.
             //
             // unlink() removes the directory entry, not the file: POSIX keeps the
             // inode and its data blocks alive for as long as any process holds an
-            // open descriptor. Reads through fd_ carry on working, but the file now
+            // open descriptor. Reads through read_fd_ carry on working, but the file now
             // has no name, so the kernel reclaims its space when the process exits
             // -- normally, by exception, by OOM kill, or by the Slurm walltime
             // reaper alike. That is the point: cleanup no longer depends on a
@@ -248,7 +289,7 @@ class PagedDiskBackend: public PointStorageBackend{
 
             built_ = true;
 
-            //7. Size and open the buffer pool over the file we just wrote.
+            //9. Size and open the buffer pool over the file we just wrote.
             RebuildPool(pool_config_);
         }
 
@@ -262,6 +303,8 @@ class PagedDiskBackend: public PointStorageBackend{
         void RebuildPool(const BufferPoolConfig& config){
             if(!built_)
                 throw std::runtime_error("PagedDiskBackend::RebuildPool: Build() has not run");
+            if(read_fd_ < 0)
+                throw std::runtime_error("PagedDiskBackend::RebuildPool: no read descriptor");
 
             pool_config_ = config;
             const uint64_t total_pages = total_data_pages_ + 1;
@@ -282,7 +325,7 @@ class PagedDiskBackend: public PointStorageBackend{
             effective_fraction_ = double(frames)*double(geometry_.page_bytes_)/double(file_bytes_);
 
             pool_ = std::unique_ptr<BufferPool>(
-                new BufferPool(fd_, geometry_.page_bytes_, size_t(frames),
+                new BufferPool(read_fd_, geometry_.page_bytes_, size_t(frames),
                                MakeReplacementPolicy(config.policy)));
             stats_ = StorageStats{};
         }
@@ -352,6 +395,8 @@ class PagedDiskBackend: public PointStorageBackend{
         uint64_t FileBytes() const { return file_bytes_; }
         size_t BlockCount() const { return block_point_counts_.size(); }
         size_t LargestBlockPages() const { return largest_block_pages_; }
+        /** True when the pool's misses bypass the OS page cache. */
+        bool DirectIo() const { return direct_io_; }
 
         // ---- buffer-pool budget, all of it worth logging alongside the counters ----
 
@@ -396,6 +441,69 @@ class PagedDiskBackend: public PointStorageBackend{
         }
 
     private:
+        /**
+         * Open the descriptor the buffer pool reads through.
+         *
+         * O_DIRECT carries a three-part alignment contract -- memory buffer, file
+         * offset and transfer length -- and the required alignment belongs to the
+         * filesystem, not to the device. Lustre insists on 4096 and returns EINVAL
+         * below it; local XFS over a 512e NVMe accepts 512. Rather than guess, we
+         * require a page size that is a multiple of 4096 and then verify with one
+         * real read.
+         *
+         * The 4096 requirement also keeps the pool's frames aligned: its slab is
+         * allocated with posix_memalign(4096) but frame i sits at i*page_bytes, so
+         * only a 4096-multiple page size makes every frame a legal target.
+         *
+         * Probing here rather than on first use means a filesystem that refuses
+         * direct I/O fails during construction, with a message naming the
+         * directory, instead of somewhere in the middle of a 5000-task sweep.
+         */
+        void OpenReadDescriptor(){
+            direct_io_ = DirectIoEnabled();
+
+            if(direct_io_ && geometry_.page_bytes_ % 4096 != 0)
+                throw std::runtime_error(
+                    "PagedDiskBackend: BUFFER_POOL_DIRECT_IO=1 requires PAGE_BYTES to be a multiple "
+                    "of 4096, got "+std::to_string(geometry_.page_bytes_));
+
+            int flags = O_RDONLY;
+            if(direct_io_){
+#ifdef O_DIRECT
+                flags |= O_DIRECT;
+#else
+                throw std::runtime_error("PagedDiskBackend: O_DIRECT is not available on this platform");
+#endif
+            }
+
+            read_fd_ = open(blockstore_filename_.c_str(), flags);
+            if(read_fd_ < 0)
+                throw std::runtime_error("PagedDiskBackend::Build: cannot reopen "+blockstore_filename_+
+                                         " for reading: "+std::string(strerror(errno)));
+
+            if(direct_io_)
+                ProbeDirectRead();
+        }
+
+        /** One aligned read, so an unsupported filesystem fails here and says why. */
+        void ProbeDirectRead(){
+            void* buffer = nullptr;
+            if(posix_memalign(&buffer, 4096, geometry_.page_bytes_) != 0 || buffer == nullptr)
+                throw std::runtime_error("PagedDiskBackend: cannot allocate an aligned probe buffer");
+
+            const ssize_t n = pread(read_fd_, buffer, geometry_.page_bytes_, 0);
+            const int probe_errno = errno;
+            std::free(buffer);
+
+            if(n != ssize_t(geometry_.page_bytes_))
+                throw std::runtime_error(
+                    "PagedDiskBackend: an O_DIRECT read of "+std::to_string(geometry_.page_bytes_)+
+                    " bytes failed under "+ResolveBlockstoreDir()+" ("+std::string(strerror(probe_errno))+
+                    "). That filesystem will not serve direct I/O at this page size -- Lustre and NFS "
+                    "commonly refuse anything below 4096. Point TEMP_BLOCKSTORE_DIR at node-local "
+                    "storage, or clear BUFFER_POOL_DIRECT_IO to read through the page cache.");
+        }
+
         /** Make one page resident and hand it back, pinned for the guard's lifetime. */
         PinnedPage FetchPage(uint64_t page_id){
             return PinnedPage(pool_.get(), page_id, pool_->Pin(page_id));
@@ -417,7 +525,9 @@ class PagedDiskBackend: public PointStorageBackend{
 
         PageGeometry geometry_;
 
-        int fd_{-1};
+        int fd_{-1};                     // the writer's descriptor; buffered, sequential
+        int read_fd_{-1};                // the pool's descriptor; O_DIRECT when enabled
+        bool direct_io_{false};
         std::string blockstore_filename_;
         bool built_{false};
         bool unlinked_{false};

@@ -47,6 +47,7 @@ enable_paged_backend="${config_lines[7]:-0}"
 buffer_pool_fractions="${config_lines[8]:-1.0}"
 page_bytes="${config_lines[9]:-4096}"
 record_bytes="${config_lines[10]:-16}"
+direct_io="${config_lines[11]:-0}"
 
 rm -f "${evaluate_tasks}" "${rsmi_tasks}"
 
@@ -72,6 +73,7 @@ write_evaluation_task() {
             "BUFFER_POOL_FRACTIONS=${buffer_pool_fractions}" \
             "PAGE_BYTES=${page_bytes}" \
             "RECORD_BYTES=${record_bytes}" \
+            "BUFFER_POOL_DIRECT_IO=${direct_io}" \
             "${evaluate_bin}" \
             "${dataset_name}" \
             "${data_sample_num}" \
@@ -215,6 +217,41 @@ if [[ ! -f "\${script_dir}/evaluate_line_n.sh" ]]; then
     exit 1
 fi
 task_list="\${EVALUATION_TASK_LIST:-\${script_dir}/hq_eval_tasks}"
+
+# ---------------------------------------------------------------------------
+# Put the paged block store on node-local NVMe.
+#
+# \${TMPDIR} is Roihu's per-job local NVMe area: created automatically, private
+# to the job, and removed when it ends. It needs no --gres reservation here,
+# unlike Puhti and Mahti. Use it rather than a hand-built path under /tmp, which
+# duplicates what the site already provides and relies on the epilog's
+# catch-all sweep for cleanup.
+#
+# Why not the default location: that is under PROJECT_ROOT on Lustre, a shared
+# network filesystem that refuses O_DIRECT reads below 4096 bytes outright and
+# serves the ones it accepts in ~310us with variance set by the rest of the
+# cluster. Local NVMe answers in ~74us and is what a single-node DBMS actually
+# runs on -- the setting the mmap critique this work responds to was made in.
+#
+# Resolved on the compute node rather than baked into the task list, since the
+# task list is generated where \${TMPDIR} means something else entirely.
+#
+# One caveat worth carrying: \${TMPDIR} is a directory on a shared filesystem,
+# not a private device. CSC documents the capacity as possibly "shared with
+# other jobs or users on the same node", and it has no per-job bandwidth quota.
+# Concurrent tasks on one node therefore contend for one NVMe queue. Page-miss
+# counts are unaffected -- they are deterministic -- but per-miss latency is
+# not. Run with --exclusive, or throttle the array with --array=1-N%k, when the
+# latency numbers themselves matter; the device probe logged on every result
+# row is what makes a contended task identifiable afterwards.
+# ---------------------------------------------------------------------------
+if [[ -z "\${TEMP_BLOCKSTORE_DIR:-}" ]]; then
+    export TEMP_BLOCKSTORE_DIR="\${TMPDIR:-/tmp/\${USER}}/blockstore/"
+fi
+mkdir -p "\${TEMP_BLOCKSTORE_DIR}"
+
+echo "TEMP_BLOCKSTORE_DIR=\${TEMP_BLOCKSTORE_DIR}"
+df -hP "\${TEMP_BLOCKSTORE_DIR}" | tail -1
 
 bash "\${script_dir}/evaluate_line_n.sh" "\${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}" "\${task_list}"
 EOF
