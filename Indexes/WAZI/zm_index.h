@@ -10,6 +10,7 @@
  */
 
 
+#include"../utils/build_profile.h"
 #ifndef ZM_INDEX_H
 #define ZM_INDEX_H
 
@@ -47,7 +48,14 @@ class ZMIndex{
         std::vector<size_t> block_ids;
         /** Build the ZM-index from an in-memory point set. */
         ZMIndex(std::vector<Point> data){
-            rank_space_map_ = new RankSpaceMapper(data);
+            // ZM's learned component: two PGM piecewise-linear models, one per
+            // dimension, fitted over the sorted coordinates. Data-driven only --
+            // ZM never sees the query workload, which is why it has no
+            // workload_model_s term.
+            {
+                ScopedPhase phase(CurrentBuildProfile().learn_s);
+                rank_space_map_ = new RankSpaceMapper(data);
+            }
             std::vector<WrappedPoint> wrapped_data;
             for(auto& pt:data) wrapped_data.emplace_back(pt);
             

@@ -1,4 +1,5 @@
 #%%
+import json
 import torch 
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
@@ -63,6 +64,16 @@ def WriteSTRSplitNode(datapoints,index_save_folder,page_size,tree_write_file,nod
         TrainRSMINode(child_datapoints,index_save_folder,page_size,tree_write_file,node_name_str+'_{}'.format(child_num))
 
 
+# How RSMI's build time actually divides. The headline number is one figure for
+# the whole recursion, but only some nodes fit a network -- nodes at or below
+# page_size are written out verbatim, and nodes below page_size*16 take an
+# STR-like split because training is unstable there. Without this split a reader
+# cannot tell whether "learned index training" fitted thousands of models or a
+# handful.
+RSMI_NODE_STATS = {'learned_nodes': 0, 'fallback_nodes': 0, 'leaf_nodes': 0,
+                   'nn_fit_seconds': 0.0}
+
+
 def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_name_str='0'):
     global RTreeStructure
     num_splits_per_dim = min(RSMI_SPLIT_CNT,np.ceil(np.sqrt(datapoints.shape[0]/(page_size*4))).astype(int))
@@ -72,6 +83,7 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
 
     # print("|N|:",datapoints.shape[0],' numsplits:',num_splits_per_dim,'min-max :',minx,miny,maxx,maxy)
     if datapoints.shape[0]<=page_size:
+        RSMI_NODE_STATS['leaf_nodes'] += 1
         RTreeStructure.append([0,0,node_name_str]+list(np.min(datapoints[:,:2],axis=0))+list(np.max(datapoints[:,:2],axis=0)))
         tree_write_file.write('{} {:.9f} {:.9f} {:.9f} {:.9f}\n'.format(0,minx,miny,maxx,maxy))
         tree_write_file.write('{}\n'.format(datapoints.shape[0]))
@@ -81,6 +93,7 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
 
     ## Neural network training at the last layer is error-prone. At final level make STR-like splits
     if datapoints.shape[0]<=page_size*16:
+        RSMI_NODE_STATS['fallback_nodes'] += 1
         num_splits_per_dim = min(RSMI_SPLIT_CNT,np.ceil(np.sqrt(datapoints.shape[0]/(page_size))).astype(int))
         WriteSTRSplitNode(datapoints,index_save_folder,page_size,tree_write_file,node_name_str,num_splits_per_dim,minx,miny,maxx,maxy)
         return
@@ -118,6 +131,8 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
     hist = []
     net.train()
 
+    RSMI_NODE_STATS['learned_nodes'] += 1
+    _nn_t0 = time()
     for epoch in range(number_of_epochs):  # loop over the dataset;
 
         pred = net(inp)
@@ -130,6 +145,7 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
         scheduler.step()
         hist.append(loss.item())
         optimizer.zero_grad()
+    RSMI_NODE_STATS['nn_fit_seconds'] += time() - _nn_t0
 
     net.eval()
 
@@ -268,6 +284,11 @@ if __name__ == '__main__':
 
     with open(index_save_folder.parent/(index_save_folder_name+'.time'),'w') as fopen:
         fopen.write('%.6f'%(t2-t1))
+
+    # Companion to .time: the evaluator reads it if present and logs the split,
+    # so RSMI's build cost stops being one opaque number.
+    with open(index_save_folder.parent/(index_save_folder_name+'.nodes'),'w') as fopen:
+        json.dump(RSMI_NODE_STATS, fopen)
 
 
 

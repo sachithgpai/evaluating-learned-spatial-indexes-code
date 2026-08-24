@@ -14,6 +14,7 @@
 
 
 #include"../utils/local_model.h"
+#include"../utils/build_profile.h"
 #include"../utils/query.h"
 #include"../utils/sort_tools.h"
 #include"../utils/density_estimators/dens_est.h"
@@ -32,7 +33,7 @@ class QDTree:public KDTree{
             root_ = new KDTreeNode();
             root_->mbr_.SetToSpanWholeSpace();
 
-            srand(time(NULL)); 
+            srand(ExperimentSeed()); 
             BuildRandomQdTree(root_,data.begin(),data.end(),TARGET_BLOCK_SIZE);
             if(disk_backup) block_store_.FinishedConstruction();
         }
@@ -172,24 +173,39 @@ class QDTree:public KDTree{
  */
 void QDTreeTrainerRandomSearch(std::vector<Point> data,std::vector<Query> &queries,std::string filename,double_t sampling_ratio = 0.1){
     
-    srand(time(NULL)); 
+    srand(ExperimentSeed()); 
 
     double_t best_cost = std::numeric_limits<double_t>::max(),temp_cost =0;
     int since_last_improvement=0,max_samples=500,sampled_data_size = data.size()*sampling_ratio;
 
     std::vector<Point> sampled_data(data.begin(),data.begin()+sampled_data_size);
+    CurrentBuildProfile().training_queries = queries.size();
     while(since_last_improvement<25 && max_samples>0){
-        QDTree qd_tree_obj(sampled_data,BLOCK_SIZE*sampling_ratio,false); // setting bool disk_backup = false
+        // Unlike FLOOD, the candidate is built on a sample and scored by an
+        // analytic cost (points that would be scanned) rather than a wall clock,
+        // so QD's search is machine-independent where FLOOD's is not.
+        std::unique_ptr<QDTree> candidate;
+        {
+            ScopedPhase phase(CurrentBuildProfile().learn_s);
+            candidate.reset(new QDTree(sampled_data,BLOCK_SIZE*sampling_ratio,false)); // disk_backup = false
+        }
+        QDTree& qd_tree_obj = *candidate;
 
-        std::vector<size_t> projected_cell_ids;
-        for(auto& query:queries)
-            qd_tree_obj.Projection(projected_cell_ids,query,qd_tree_obj.root_);
+        {
+            ScopedPhase phase(CurrentBuildProfile().eval_s);
+            std::vector<size_t> projected_cell_ids;
+            for(auto& query:queries)
+                qd_tree_obj.Projection(projected_cell_ids,query,qd_tree_obj.root_);
 
-        temp_cost = qd_tree_obj.block_store_.NumOfPointsInBlocks(projected_cell_ids);
-        
+            temp_cost = qd_tree_obj.block_store_.NumOfPointsInBlocks(projected_cell_ids);
+        }
+        CurrentBuildProfile().search_trials++;
+
         if(temp_cost < best_cost){
+            CurrentBuildProfile().search_improvements++;
             std::cout<<(500-max_samples)<<" Improved cost from "<< best_cost<<" to "<<temp_cost<<" \n";
             best_cost = temp_cost;
+            ScopedPhase phase(CurrentBuildProfile().serialize_s);
             ofstream best_tree(filename,ios_base::out);
             qd_tree_obj.SaveQDTree(best_tree,0,qd_tree_obj.root_);
             best_tree.close();

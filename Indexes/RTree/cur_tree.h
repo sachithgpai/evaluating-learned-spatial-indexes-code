@@ -17,6 +17,7 @@
 #include"rtree_base.h"
 #include"../utils/sort_tools.h"
 #include"../utils/density_estimators/weighted_dens_est.h"
+#include"../utils/build_profile.h"
 
 
 /**
@@ -45,7 +46,15 @@ class CURTree: public RTreeBASE{
 
             node_cnt_=0;
 
-            std::vector<WrappedPoint> wrapped_data = WeightPointsWithQuery(data,queries);
+            // The whole of CUR's workload-awareness is the weighting step: it is
+            // the only place the query workload is read. Everything after it is
+            // ordinary recursive partitioning over already-weighted points.
+            CurrentBuildProfile().training_queries = queries.size();
+            std::vector<WrappedPoint> wrapped_data;
+            {
+                ScopedPhase phase(CurrentBuildProfile().workload_model_s);
+                wrapped_data = WeightPointsWithQuery(data,queries);
+            }
             root_ = BuildTree(wrapped_data.begin(),wrapped_data.end(),0);
 
             block_store_.FinishedConstruction();

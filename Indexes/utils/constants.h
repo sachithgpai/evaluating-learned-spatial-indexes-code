@@ -37,6 +37,27 @@ std::string PROJECT_ROOT = []() {
 }();
 
 /**
+ * Seed for the global C rand() that FLOOD's and QD's random searches draw from.
+ *
+ * Three call sites used to seed it with time(NULL): SamplZTree's constructor and
+ * QDTree's, twice. Because WAZI is built first and the evaluator is one process,
+ * FLOOD -- which never calls srand itself -- silently inherited a wall-clock seed
+ * and became irreproducible along with them. Repeat runs of one identical task
+ * gave 31/72/26 search trials for QD and 38/41/28 for FLOOD.
+ *
+ * A fixed default makes a task reproducible; EXPERIMENT_SEED lets a sweep draw
+ * several independent search paths on purpose rather than by accident.
+ */
+inline unsigned int ExperimentSeed(){
+    const char* raw = std::getenv("EXPERIMENT_SEED");
+    if(raw != nullptr && std::string(raw).size() > 0){
+        try { return static_cast<unsigned int>(std::stoul(std::string(raw))); }
+        catch(...) { /* fall through to the default */ }
+    }
+    return 42u;
+}
+
+/**
  * Shared compile-time constants used across the index implementations.
  */
 class Constants

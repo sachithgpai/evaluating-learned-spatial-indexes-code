@@ -10,6 +10,7 @@
 #include<random>
 #include<cmath>
 #include"flood.h"
+#include"../utils/build_profile.h"
 
 
 /**
@@ -18,6 +19,7 @@
  */
 
 std::pair<std::array<int,Constants::DIM>, std::array<int,Constants::DIM>> FloodTrainerRandomSearch(std::vector<Point> &datapoints,std::vector<Query> &queries){
+    CurrentBuildProfile().training_queries = queries.size();
     int since_last_improvement=0,max_samples=500;
     double_t best_time =  std::numeric_limits<double_t>::max();
     std::array<int, 2> best_dim_ord;
@@ -45,17 +47,25 @@ std::pair<std::array<int,Constants::DIM>, std::array<int,Constants::DIM>> FloodT
         std::array<int, 2> split_per_dim{{l,m}};
 
 
+        // Building the candidate grid is the search cost; replaying the queries
+        // against it is both the learning signal and the workload-awareness, so
+        // it lands in eval_s which both reported aggregates include.
         FloodIndex floodobj(dim_ord,split_per_dim);
-        floodobj.LoadElements(datapoints,false);
+        {
+            ScopedPhase phase(CurrentBuildProfile().learn_s);
+            floodobj.LoadElements(datapoints,false);
+        }
 
         auto start = std::chrono::system_clock::now();
         for(int i=0;i<queries.size()*0.05;i++)
             floodobj.RangeQuery(queries[i]);
         auto end = std::chrono::system_clock::now();
 
-
         double_t elapsed_seconds = std::chrono::duration_cast<std::chrono::nanoseconds>(end-start).count();
+        CurrentBuildProfile().eval_s += elapsed_seconds/1e9;
+        CurrentBuildProfile().search_trials++;
         if(elapsed_seconds<best_time){
+            CurrentBuildProfile().search_improvements++;
             best_time = elapsed_seconds;
             best_dim_ord = dim_ord;
             best_split_per_dim = split_per_dim;
@@ -96,7 +106,7 @@ std::pair<std::array<int,Constants::DIM>, std::array<int,Constants::DIM>> FloodT
     }
     query_file.close();
 
-    std::mt19937 rng(std::random_device{}());
+    std::mt19937 rng(ExperimentSeed());
     std::shuffle(query_array.begin(),query_array.end(),rng);
     auto end = std::chrono::system_clock::now();
     

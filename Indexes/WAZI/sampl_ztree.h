@@ -22,6 +22,7 @@
 #include<limits>
 #include<string>
 #include"ztree.h"
+#include"../utils/build_profile.h"
 #include"../utils/density_estimators/dens_est.h"
 #include"../utils/point.h"
 #include"../utils/sort_tools.h"
@@ -74,7 +75,7 @@ class SamplZTree: public ZTree{
         root_->mbr_.high_=Point(data_high_x,data_high_y);
 
         
-        std::srand(std::time(NULL)); // use current time as seed for random generator
+        std::srand(ExperimentSeed()); // fixed by default: FLOOD inherits this seed
         ConstructDensityEstimators(dataset, queries, BoundingRectangle(Point(data_low_x,data_low_y),Point(data_high_x+Constants::EPSILON_ERR, data_high_y+Constants::EPSILON_ERR)));
 
 
@@ -95,7 +96,12 @@ class SamplZTree: public ZTree{
     /** Construct the density estimators used by the split objective. */
     void ConstructDensityEstimators(std::vector<Point> &dataset, std::vector<Query> &queries, BoundingRectangle mbr){
 
-        datapoint_density_estimator_ = new DensEstTree(dataset, dens_est_data_gran_,mbr);
+        // The data estimator models the DATA distribution -- it would exist in a
+        // workload-agnostic variant too, so it is learning, not workload-awareness.
+        {
+            ScopedPhase phase(CurrentBuildProfile().learn_s);
+            datapoint_density_estimator_ = new DensEstTree(dataset, dens_est_data_gran_,mbr);
+        }
         std::cout<<"No isseus with data estimator"<<"\n";
 
         /* Splitting up the endpoints and starts of queries*/
@@ -128,9 +134,14 @@ class SamplZTree: public ZTree{
         // std::cout<<"No Points outside MBR"<<"\n";
 
 
-        query_starts_density_estimator_ = new DensEstTree(rank_query_starts_de,dens_est_query_gran_,mbr);
-        std::cout<<"No isseus with querylow estimator"<<"\n";
-        query_ends_density_estimator_ = new DensEstTree(rank_query_ends_de,dens_est_query_gran_,mbr);
+        // These two read only the query workload: this is WAZI's workload-awareness.
+        CurrentBuildProfile().training_queries = queries.size();
+        {
+            ScopedPhase phase(CurrentBuildProfile().workload_model_s);
+            query_starts_density_estimator_ = new DensEstTree(rank_query_starts_de,dens_est_query_gran_,mbr);
+            std::cout<<"No isseus with querylow estimator"<<"\n";
+            query_ends_density_estimator_ = new DensEstTree(rank_query_ends_de,dens_est_query_gran_,mbr);
+        }
         std::cout<<"No isseus with queryhigh estimator"<<"\n";
     }
 
@@ -220,8 +231,13 @@ class SamplZTree: public ZTree{
 
 
         size_t mid_ix = (num_data_here-1)/2;
-        double_t estimate_query_start_here =  query_starts_density_estimator_->EstimateCount(node->mbr_);
-        double_t estimate_query_end_here =  query_ends_density_estimator_->EstimateCount(node->mbr_);
+        double_t estimate_query_start_here, estimate_query_end_here;
+        {
+            ScopedPhase phase(CurrentBuildProfile().workload_oracle_s);
+            CurrentBuildProfile().oracle_calls += 2;
+            estimate_query_start_here =  query_starts_density_estimator_->EstimateCount(node->mbr_);
+            estimate_query_end_here =  query_ends_density_estimator_->EstimateCount(node->mbr_);
+        }
 
 
 
@@ -272,10 +288,16 @@ class SamplZTree: public ZTree{
         long double na,nb,nc,nd;
 
 
-        na_raw = datapoint_density_estimator_->EstimateCount(BoundingRectangle(node->mbr_.low_,split));
-        nb_raw = datapoint_density_estimator_->EstimateCount(BoundingRectangle(Point(split.elements_[0],node->mbr_.low_.elements_[1]), Point(node->mbr_.high_.elements_[0],split.elements_[1])));
-        nc_raw = datapoint_density_estimator_->EstimateCount(BoundingRectangle(Point(node->mbr_.low_.elements_[0],split.elements_[1]),Point(split.elements_[0],node->mbr_.high_.elements_[1])));
-        nd_raw = datapoint_density_estimator_->EstimateCount(BoundingRectangle(split,node->mbr_.high_));
+        {
+            // The data estimator models the DATA distribution, so its cost is
+            // learning, not workload-awareness. A workload-agnostic WAZI would
+            // still pay it.
+            ScopedPhase phase(CurrentBuildProfile().learn_oracle_s);
+            na_raw = datapoint_density_estimator_->EstimateCount(BoundingRectangle(node->mbr_.low_,split));
+            nb_raw = datapoint_density_estimator_->EstimateCount(BoundingRectangle(Point(split.elements_[0],node->mbr_.low_.elements_[1]), Point(node->mbr_.high_.elements_[0],split.elements_[1])));
+            nc_raw = datapoint_density_estimator_->EstimateCount(BoundingRectangle(Point(node->mbr_.low_.elements_[0],split.elements_[1]),Point(split.elements_[0],node->mbr_.high_.elements_[1])));
+            nd_raw = datapoint_density_estimator_->EstimateCount(BoundingRectangle(split,node->mbr_.high_));
+        }
 
 
         /* IF the partition creates very small page */
@@ -305,15 +327,19 @@ class SamplZTree: public ZTree{
 
 
         // TODO: explain why do we need to add 1 to the result?
-        sa = query_starts_density_estimator_->EstimateCount(BoundingRectangle(node->mbr_.low_,split))+1;
-        sb = query_starts_density_estimator_->EstimateCount(BoundingRectangle(Point(split.elements_[0],node->mbr_.low_.elements_[1]), Point(node->mbr_.high_.elements_[0],split.elements_[1])))+1;
-        sc = query_starts_density_estimator_->EstimateCount(BoundingRectangle(Point(node->mbr_.low_.elements_[0],split.elements_[1]),Point(split.elements_[0],node->mbr_.high_.elements_[1])))+1;
-        sd = query_starts_density_estimator_->EstimateCount(BoundingRectangle(split,node->mbr_.high_))+1;
-
-        ea = query_ends_density_estimator_->EstimateCount(BoundingRectangle(node->mbr_.low_,split))+1;
-        eb = query_ends_density_estimator_->EstimateCount(BoundingRectangle(Point(split.elements_[0],node->mbr_.low_.elements_[1]), Point(node->mbr_.high_.elements_[0],split.elements_[1])))+1;
-        ec = query_ends_density_estimator_->EstimateCount(BoundingRectangle(Point(node->mbr_.low_.elements_[0],split.elements_[1]),Point(split.elements_[0],node->mbr_.high_.elements_[1])))+1;
-        ed = query_ends_density_estimator_->EstimateCount(BoundingRectangle(split,node->mbr_.high_))+1;
+{
+            ScopedPhase phase(CurrentBuildProfile().workload_oracle_s);
+            CurrentBuildProfile().oracle_calls += 8;
+            sa = query_starts_density_estimator_->EstimateCount(BoundingRectangle(node->mbr_.low_,split))+1;
+            sb = query_starts_density_estimator_->EstimateCount(BoundingRectangle(Point(split.elements_[0],node->mbr_.low_.elements_[1]), Point(node->mbr_.high_.elements_[0],split.elements_[1])))+1;
+            sc = query_starts_density_estimator_->EstimateCount(BoundingRectangle(Point(node->mbr_.low_.elements_[0],split.elements_[1]),Point(split.elements_[0],node->mbr_.high_.elements_[1])))+1;
+            sd = query_starts_density_estimator_->EstimateCount(BoundingRectangle(split,node->mbr_.high_))+1;
+    
+            ea = query_ends_density_estimator_->EstimateCount(BoundingRectangle(node->mbr_.low_,split))+1;
+            eb = query_ends_density_estimator_->EstimateCount(BoundingRectangle(Point(split.elements_[0],node->mbr_.low_.elements_[1]), Point(node->mbr_.high_.elements_[0],split.elements_[1])))+1;
+            ec = query_ends_density_estimator_->EstimateCount(BoundingRectangle(Point(node->mbr_.low_.elements_[0],split.elements_[1]),Point(split.elements_[0],node->mbr_.high_.elements_[1])))+1;
+            ed = query_ends_density_estimator_->EstimateCount(BoundingRectangle(split,node->mbr_.high_))+1;
+        }
         
 
         double_t shape_cost_YX, shape_cost_XY;

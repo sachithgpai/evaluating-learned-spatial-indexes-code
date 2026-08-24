@@ -15,6 +15,7 @@
 #include"../utils/local_model.h"
 #include"../utils/query.h"
 #include"../utils/density_estimators/query_dens_est.h"
+#include"../utils/build_profile.h"
 #include"rtree_node.h"
 #include"rtree_base.h"
 #include"../utils/sort_tools.h"
@@ -51,7 +52,15 @@ class RWTree: public RTreeBASE{
         RWTree(std::vector<Point> data, std::vector<Query> queries){
 
             ConfigureBuildParameters();
-            BuildQueryScanCostEstimator(std::move(queries));
+            // Two phases with nothing shared but the estimator pointer: the first
+            // reads only queries, the second only data. The cost-oracle calls the
+            // second phase makes are counted rather than timed -- see the note in
+            // build_profile.h on why wrapping them in a clock would distort them.
+            CurrentBuildProfile().training_queries = queries.size();
+            {
+                ScopedPhase phase(CurrentBuildProfile().workload_model_s);
+                BuildQueryScanCostEstimator(std::move(queries));
+            }
             BuildRWTree(data);
             block_store_.FinishedConstruction();
         }
@@ -69,6 +78,8 @@ class RWTree: public RTreeBASE{
 
         /** Estimate page-scan cost as the number of training queries intersecting `mbr`. */
         double_t EstimateScanCost(const BoundingRectangle& mbr){
+            CurrentBuildProfile().oracle_calls++;
+            ScopedPhase phase(CurrentBuildProfile().workload_oracle_s);
             if(query_scan_cost_estimator_!=NULL)
                 return query_scan_cost_estimator_->EstimateOverlapCount(mbr);
 

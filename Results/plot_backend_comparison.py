@@ -113,12 +113,14 @@ def figure_one(by_model, out: Path) -> None:
     ax_r.set_ylim(0, 60)
     ax_r.set_xlabel("buffer pool size (fraction of index file)")
     ax_r.set_ylabel("cache hit rate (%)")
+    ax_r.set_ylim(0, 100)
     ax_r.set_title("All indexes cache equally well", loc="left")
 
     fig.suptitle("Index quality shows up as pages touched, not as cache efficiency",
                  x=0.005, ha="left", fontsize=10, fontweight="bold")
     type_legend_below(fig)
     fig.tight_layout(rect=(0, 0.06, 1, 0.93))
+    fig.tight_layout(rect=[0, 0.10, 1, 0.90])
     for ext in ("png", "pdf"):
         fig.savefig(out.with_suffix(f".{ext}"), bbox_inches="tight")
     plt.close(fig)
@@ -174,6 +176,7 @@ def figure_two(mmap_lat, by_model, out: Path) -> None:
                  x=0.005, ha="left", fontsize=10, fontweight="bold")
     type_legend_below(fig)
     fig.tight_layout(rect=(0, 0.06, 1, 0.92))
+    fig.tight_layout(rect=[0, 0.10, 1, 0.90])
     for ext in ("png", "pdf"):
         fig.savefig(out.with_suffix("." + ext), bbox_inches="tight")
     plt.close(fig)
@@ -280,6 +283,7 @@ def figure_three(results_rows, mmap_lat, by_model, out: Path) -> None:
     fig.suptitle("Replacing mmap with a managed buffer pool", x=0.005, ha="left",
                  fontsize=10, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.tight_layout(rect=[0, 0.10, 1, 0.90])
     for ext in ("png", "pdf"):
         fig.savefig(out.with_suffix("." + ext), bbox_inches="tight")
     plt.close(fig)

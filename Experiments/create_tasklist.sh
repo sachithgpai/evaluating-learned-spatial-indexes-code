@@ -185,6 +185,38 @@ fi
 evaluation_task_count="$(wc -l < "${evaluate_tasks}" | tr -d '[:space:]')"
 rsmi_task_count="$(wc -l < "${rsmi_tasks}" | tr -d '[:space:]')"
 
+# Slurm rejects an array whose largest index reaches MaxArraySize. Cap the span
+# the generated script declares and let TASK_OFFSET cover the rest, rather than
+# emitting a header that cannot be submitted.
+max_array_span="$(scontrol show config 2>/dev/null | awk -F'= *' '/MaxArraySize/{print $2-1}')"
+max_array_span="${max_array_span:-1000}"
+# The real ceiling on array elements is the association's MaxSubmitJobs, not
+# MaxArraySize: Slurm counts each element against it. Query it, fall back to a
+# conservative 200, and clamp to MaxArraySize as well.
+max_submit_jobs="$(sacctmgr -n -p show assoc where user="${USER}" partition=small \
+                   format=MaxSubmitJobs 2>/dev/null | head -1 | cut -d'|' -f1)"
+max_submit_jobs="${max_submit_jobs:-200}"
+max_elements="${max_submit_jobs}"
+(( max_elements > max_array_span )) && max_elements="${max_array_span}"
+
+# Pick the smallest stride that fits the whole list into max_elements.
+tasks_per_element="${TASKS_PER_ELEMENT:-$(( (evaluation_task_count + max_elements - 1) / max_elements ))}"
+(( tasks_per_element < 1 )) && tasks_per_element=1
+evaluation_array_span=$(( (evaluation_task_count + tasks_per_element - 1) / tasks_per_element ))
+
+
+# A walltime sized for ONE task would kill an element part-way through its
+# stride. Budget generously per task -- the small run reached ~20 min and the
+# full config runs more fractions over more block sizes -- and clamp to the
+# partition maximum of 3 days.
+minutes_per_eval_task="${MINUTES_PER_EVAL_TASK:-45}"
+format_walltime() {
+    local minutes="$1"
+    (( minutes > 4320 )) && minutes=4320          # 3 days, the 'small' cap
+    printf '%d-%02d:%02d:00' $(( minutes/1440 )) $(( (minutes%1440)/60 )) $(( minutes%60 ))
+}
+evaluation_time_limit="$(format_walltime $(( tasks_per_element * minutes_per_eval_task )))"
+
 # Ensure the evaluator and trainers have all expected output directories.
 dataset_root="${script_dir}/${dataset_name}"
 mkdir -p "${dataset_root}/TrainedIndexes/QDTree"
@@ -198,13 +230,16 @@ mkdir -p "${repo_root}/temp_blockstore"
 cat > "${slurm_evaluate_script}" <<EOF
 #!/usr/bin/env bash
 #SBATCH --account=project_2005865
-#SBATCH --partition=large
+# 'small' not 'large': large has MinNodes=6 and rejects a one-core job outright.
+# small is MaxNodes=1, MaxTime=3-00:00:00, which is what a single-threaded
+# evaluator task actually needs.
+#SBATCH --partition=small
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=4000
-#SBATCH --time=03:00:00
+#SBATCH --mem=8000
+#SBATCH --time=${evaluation_time_limit}
 #SBATCH --job-name=evaluate-indexes
-#SBATCH --array=1-${evaluation_task_count}
+#SBATCH --array=1-${evaluation_array_span}
 #SBATCH --output=slurm-evaluate-%A_%a.out
 #SBATCH --error=slurm-evaluate-%A_%a.err
 
@@ -253,13 +288,64 @@ mkdir -p "\${TEMP_BLOCKSTORE_DIR}"
 echo "TEMP_BLOCKSTORE_DIR=\${TEMP_BLOCKSTORE_DIR}"
 df -hP "\${TEMP_BLOCKSTORE_DIR}" | tail -1
 
-bash "\${script_dir}/evaluate_line_n.sh" "\${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}" "\${task_list}"
+# ---------------------------------------------------------------------------
+# One array element runs a STRIDE of consecutive task lines, not a single task.
+#
+# The binding limit is not MaxArraySize (1001, a cap on the index range) but the
+# association's MaxSubmitJobs -- 200 on 'small' -- because Slurm counts every
+# array ELEMENT against it. At one task per element a 5000-line list would need
+# 25 separate submissions drip-fed as the queue drained. At ${tasks_per_element}
+# tasks per element it is ${evaluation_array_span} elements: one submission,
+# inside every limit.
+#
+# Element i covers lines  (i-1)*STRIDE + 1 + OFFSET  ..  i*STRIDE + OFFSET.
+# TASK_OFFSET remains available for resuming part-way through a list.
+#
+# Size --time for STRIDE tasks, not one: the small run took up to ~20 min per
+# task, so ${tasks_per_element} of them needs hours, and a limit sized for a
+# single task would kill every element part-way through.
+# ---------------------------------------------------------------------------
+stride="\${TASKS_PER_ELEMENT:-${tasks_per_element}}"
+offset="\${TASK_OFFSET:-0}"
+element="\${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}"
+total_tasks=\$(wc -l < "\${task_list}")
+
+first_line=\$(( (element - 1) * stride + 1 + offset ))
+last_line=\$(( element * stride + offset ))
+(( last_line > total_tasks )) && last_line=\${total_tasks}
+
+if (( first_line > total_tasks )); then
+    echo "element \${element}: lines \${first_line}.. are past the end of \${task_list} (\${total_tasks} lines); nothing to do"
+    exit 0
+fi
+
+echo "element \${element}: running lines \${first_line}..\${last_line} of \${total_tasks} (stride \${stride})"
+
+# A failure in one task must not abort the other STRIDE-1 in this element, so the
+# loop tolerates a non-zero exit, records which line failed, and reports at the
+# end. Without this a single bad task would silently cost a whole stride.
+failed_lines=()
+for (( line_number = first_line; line_number <= last_line; line_number++ )); do
+    echo "=== [\$(date +%H:%M:%S)] element \${element} -> task line \${line_number} ==="
+    if ! bash "\${script_dir}/evaluate_line_n.sh" "\${line_number}" "\${task_list}"; then
+        echo "TASK FAILED: line \${line_number}" >&2
+        failed_lines+=("\${line_number}")
+    fi
+done
+
+if (( \${#failed_lines[@]} > 0 )); then
+    echo "element \${element}: \${#failed_lines[@]} task(s) failed: \${failed_lines[*]}" >&2
+    exit 1
+fi
+echo "element \${element}: all \$(( last_line - first_line + 1 )) tasks completed"
 EOF
 
 cat > "${slurm_rsmi_script}" <<EOF
 #!/usr/bin/env bash
 #SBATCH --account=project_2005865
-#SBATCH --partition=test
+# 'test' caps at MaxTime=00:15:00, so the 4-hour request below was always
+# rejected there. RSMI training runs a few minutes per task but the cap is hard.
+#SBATCH --partition=small
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8000
@@ -279,7 +365,29 @@ if [[ ! -f "\${script_dir}/rsmi_line_n.sh" ]]; then
 fi
 task_list="\${RSMI_TASK_LIST:-\${script_dir}/hq_tasks_RSMI}"
 
-bash "\${script_dir}/rsmi_line_n.sh" "\${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}" "\${task_list}"
+# RSMI.py needs torch and zCurve. The task lines call a bare \`python3\`, which in
+# a clean batch environment resolves to the site python -- no torch there, so
+# every array element would die on the import. Activating here rather than in the
+# task line keeps the task list runnable by hand too.
+repo_root="\$(cd "\${script_dir}/.." && pwd)"
+if [[ -f "\${repo_root}/.venv/bin/activate" ]]; then
+    # shellcheck disable=SC1091
+    source "\${repo_root}/.venv/bin/activate"
+    echo "venv: \$(command -v python3)"
+else
+    echo "WARNING: \${repo_root}/.venv not found; python3 is \$(command -v python3)" >&2
+fi
+
+# One task per array element. 200 RSMI tasks fits inside MaxSubmitJobs=200
+# exactly, so this array needs no striding.
+line_number=\$(( \${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required} + \${TASK_OFFSET:-0} ))
+total_tasks=\$(wc -l < "\${task_list}")
+if (( line_number > total_tasks )); then
+    echo "line \${line_number} is past the end of \${task_list} (\${total_tasks} lines); nothing to do"
+    exit 0
+fi
+
+bash "\${script_dir}/rsmi_line_n.sh" "\${line_number}" "\${task_list}"
 EOF
 
 chmod +x "${slurm_evaluate_script}"

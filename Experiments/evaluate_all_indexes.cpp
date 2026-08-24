@@ -38,6 +38,7 @@
 
 #include"../Indexes/utils/json.hpp"
 #include"../Indexes/utils/device_probe.h"
+#include"../Indexes/utils/build_profile.h"
 
 
 
@@ -60,6 +61,102 @@ filesystem::path configured_output_dir(const string& dataset_folder_name) {
     }
     return filesystem::path(PROJECT_ROOT) / "Experiments" / dataset_folder_name / "ResultsFolder";
 }
+
+static bool EnvFlag(const char* name, bool fallback);   // defined with the storage-pass config below
+
+/**
+ * The query workload an index is TRAINED on -- normally the real one.
+ *
+ * With NULL_WORKLOAD=1 each query keeps its exact width and height but is moved
+ * to a uniformly random position inside the data extent. Box count, box sizes and
+ * therefore the selectivity distribution are all preserved; the only thing
+ * destroyed is the spatial correlation between queries and data, and between one
+ * query and the next.
+ *
+ * That is the ablation R4's question needs. The phase timers say how many seconds
+ * an index spends in workload-aware code; they cannot say how many of those
+ * seconds are *attributable* to the workload carrying signal, because the same
+ * code runs either way. Differencing a real-workload build against a
+ * null-workload one answers that, and it does so without depending on where the
+ * phase boundaries were drawn.
+ *
+ * The MEASURED workload is untouched -- only training input changes -- so query
+ * latency in an ablation run is the cost of having trained on noise, which is a
+ * second, separately interesting number.
+ */
+static vector<Query> TrainingWorkload(const vector<Query>& real_queries,
+                                      const vector<Point>& datapoints){
+    if(!EnvFlag("NULL_WORKLOAD", false) || real_queries.empty() || datapoints.empty())
+        return real_queries;
+
+    double lo[Constants::DIM], hi[Constants::DIM];
+    for(size_t d=0;d<Constants::DIM;d++){ lo[d]=datapoints[0].elements_[d]; hi[d]=lo[d]; }
+    for(const Point& p: datapoints)
+        for(size_t d=0;d<Constants::DIM;d++){
+            lo[d]=min(lo[d],p.elements_[d]);
+            hi[d]=max(hi[d],p.elements_[d]);
+        }
+
+    mt19937 rng(ExperimentSeed());
+    vector<Query> null_queries;
+    null_queries.reserve(real_queries.size());
+    for(const Query& q: real_queries){
+        Query n = q;
+        for(size_t d=0;d<Constants::DIM;d++){
+            const double extent = q.high_.elements_[d] - q.low_.elements_[d];
+            const double span   = max(0.0, (hi[d]-lo[d]) - extent);
+            const double start  = lo[d] + uniform_real_distribution<double>(0.0, 1.0)(rng)*span;
+            n.low_.elements_[d]  = start;
+            n.high_.elements_[d] = start + extent;
+        }
+        null_queries.push_back(n);
+    }
+    cerr<<"NULL_WORKLOAD: trained on "<<null_queries.size()<<" position-randomized queries"<<endl;
+    return null_queries;
+}
+
+
+/**
+ * Write the build-cost decomposition alongside the wall-clock build time.
+ *
+ * `build_time` keeps its existing meaning and position so nothing downstream
+ * moves. The phases are additional columns; `build_unaccounted_s` is the part
+ * of the wall clock no phase claimed, logged rather than hidden so a decomposition
+ * that has drifted out of date is visible in the data instead of being asserted.
+ */
+static void LogBuildProfile(json& log_json, double wall_seconds){
+    const BuildProfile& p = CurrentBuildProfile();
+
+    log_json["build_workload_model_s"]  = p.workload_model_s;
+    log_json["build_workload_oracle_s"] = p.workload_oracle_s;
+    log_json["build_learn_s"]           = p.learn_s;
+    log_json["build_learn_oracle_s"]    = p.learn_oracle_s;
+    log_json["build_eval_s"]            = p.eval_s;
+    // Everything the index did not claim as learning, workload-modelling or
+    // serialization. Derived so the five phases always sum to build_time.
+    log_json["build_construct_s"]      = wall_seconds - p.ClaimedSeconds();
+    log_json["build_serialize_s"]      = p.serialize_s;
+
+    // The two headline components. Disjoint, so together with construct and
+    // serialize they partition build_total_s and can be stacked in a figure.
+    log_json["build_learning_s"]           = p.LearningSeconds();
+    log_json["build_workload_awareness_s"] = p.WorkloadAwarenessSeconds();
+
+    log_json["build_search_trials"]       = p.search_trials;
+    log_json["build_search_improvements"] = p.search_improvements;
+    log_json["build_oracle_calls"]        = p.oracle_calls;
+    log_json["build_training_queries"]    = p.training_queries;
+    log_json["build_learned_nodes"]       = p.learned_nodes;
+    log_json["build_fallback_nodes"]      = p.fallback_nodes;
+
+    // build_time keeps its historical meaning, which for RSMI is the Python
+    // training span only. build_total_s is the figure the phases always sum to,
+    // so downstream never has to know which indexes those two differ for.
+    log_json["build_total_s"]        = wall_seconds;
+    log_json["build_accounting"]     = BuildAccountingName(p.accounting);
+    log_json["null_workload"]        = EnvFlag("NULL_WORKLOAD", false);
+}
+
 
 // ===================== Storage-backend measurement passes =====================
 //
@@ -597,7 +694,8 @@ int main(int argc, char* argv[]){
     {   //############# WAZI #################
         // Training
         vector<Point> model_datapoints = datapoints;
-        vector<Query> model_queries = countbased_queries;
+        vector<Query> model_queries = TrainingWorkload(countbased_queries, datapoints);
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         SamplZTree wazi_obj(model_datapoints,model_queries);
         auto train_end = std::chrono::high_resolution_clock::now();
@@ -605,6 +703,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="WAZI";
         log_json["build_time"] = wazi_tree_build_time;
+        LogBuildProfile(log_json, wazi_tree_build_time);
 
         //################## Query Processing Count Based ##################
         log_json["area_or_count_based"]="count";
@@ -661,6 +760,7 @@ int main(int argc, char* argv[]){
     {   //############# ZIndex #################
         // Training
         vector<Point> model_datapoints = datapoints;
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         BaseZTree zindex_obj(model_datapoints);
         auto train_end = std::chrono::high_resolution_clock::now();
@@ -668,6 +768,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="ZIndex";
         log_json["build_time"] = zindex_tree_build_time;
+        LogBuildProfile(log_json, zindex_tree_build_time);
 
         //################## Query Processing Count Based ##################
         log_json["area_or_count_based"]="count";
@@ -722,6 +823,7 @@ int main(int argc, char* argv[]){
     {   //############# ZM-Index #################
         // Training
         vector<Point> model_datapoints = datapoints;
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         ZMIndex zmindex_obj(std::move(model_datapoints));
         auto train_end = std::chrono::high_resolution_clock::now();
@@ -729,6 +831,7 @@ int main(int argc, char* argv[]){
         std::cout<<"Finished building ZM"<<std::endl;
         log_json["model"]="ZM";
         log_json["build_time"] = zmindex_tree_build_time;
+        LogBuildProfile(log_json, zmindex_tree_build_time);
 
 
 
@@ -806,6 +909,7 @@ int main(int argc, char* argv[]){
     {   //############# GRID #################
         // Training
         vector<Point> model_datapoints = datapoints;
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         int num_splits_uniform_grid = int(sqrt(datapoints.size()/BLOCK_SIZE));
         std::array<int, 2> split_per_dim{num_splits_uniform_grid, num_splits_uniform_grid};
@@ -817,6 +921,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="GRID";
         log_json["build_time"] = unigrid_build_time;
+        LogBuildProfile(log_json, unigrid_build_time);
 
 
         //################## Query Processing Count Based ##################
@@ -873,7 +978,8 @@ int main(int argc, char* argv[]){
         // Training
         vector<Point> trainer_datapoints = datapoints;
         vector<Point> model_datapoints = datapoints;
-        vector<Query> model_queries = countbased_queries;
+        vector<Query> model_queries = TrainingWorkload(countbased_queries, datapoints);
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         auto flood_config = FloodTrainerRandomSearch(trainer_datapoints,model_queries);
         FloodIndex flood_obj(flood_config.first,flood_config.second);
@@ -885,6 +991,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="FLOOD";
         log_json["build_time"] = flood_build_time;
+        LogBuildProfile(log_json, flood_build_time);
 
         //################## Query Processing Count Based ##################
         log_json["area_or_count_based"]="count";
@@ -940,6 +1047,7 @@ int main(int argc, char* argv[]){
     {   /* ##########################    STR   ######################################*/
         // Training
         vector<Point> model_datapoints = datapoints;
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         STRTree str_tree_obj(std::move(model_datapoints));
         auto train_end = std::chrono::high_resolution_clock::now();
@@ -947,6 +1055,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="STR";
         log_json["build_time"] = str_tree_build_time;
+        LogBuildProfile(log_json, str_tree_build_time);
 
         //################## Query Processing Count Based ##################
         {
@@ -1004,6 +1113,7 @@ int main(int argc, char* argv[]){
     {   //########## RSTAR #################
         // Training
         vector<Point> model_datapoints = datapoints;
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         RSTARTree rstar_tree_obj(std::move(model_datapoints));
         auto train_end = std::chrono::high_resolution_clock::now();
@@ -1011,6 +1121,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="RSTAR";
         log_json["build_time"] = rstar_tree_build_time;
+        LogBuildProfile(log_json, rstar_tree_build_time);
 
 
         //################## Query Processing Count Based ##################
@@ -1068,7 +1179,8 @@ int main(int argc, char* argv[]){
     {   //########## CUR #################
         // Training
         vector<Point> model_datapoints = datapoints;
-        vector<Query> model_queries = countbased_queries;
+        vector<Query> model_queries = TrainingWorkload(countbased_queries, datapoints);
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         CURTree cur_tree_obj(std::move(model_datapoints),std::move(model_queries));
         cout<<" CUR Finished Building"<<endl;
@@ -1077,6 +1189,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="CUR";
         log_json["build_time"] = cur_tree_build_time;
+        LogBuildProfile(log_json, cur_tree_build_time);
         
 
         //################## Query Processing Count Based ##################
@@ -1135,7 +1248,8 @@ int main(int argc, char* argv[]){
     {   //########## RW #################
         // Training
         vector<Point> model_datapoints = datapoints;
-        vector<Query> model_queries = countbased_queries;
+        vector<Query> model_queries = TrainingWorkload(countbased_queries, datapoints);
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         cout<<" RW Build Started"<<endl;
         RWTree rw_tree_obj(std::move(model_datapoints),std::move(model_queries));
@@ -1145,6 +1259,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="RW";
         log_json["build_time"] = rw_tree_build_time;
+        LogBuildProfile(log_json, rw_tree_build_time);
         
 
         //################## Query Processing Count Based ##################
@@ -1200,7 +1315,12 @@ int main(int argc, char* argv[]){
     cout<<dataset_folder_name<<" "<<data_sample_num<<" "<<data_ent_id<<" "<<BLOCK_SIZE<<" "<<query_ent_id<<" "<<selectivity<<" RSMI Started"<<endl;
     {    //########## RSMI-RTree-NoLocalModel #################
         // Training
+        ResetBuildProfile();
+        auto rsmi_load_start = std::chrono::high_resolution_clock::now();
         RTreeBASE rsmi_tree_obj(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/RSMI/"+query_agnostic_tree_name+".tree");
+        auto rsmi_load_end = std::chrono::high_resolution_clock::now();
+        const double rsmi_tree_load_seconds =
+            chrono::duration_cast<chrono::nanoseconds>(rsmi_load_end-rsmi_load_start).count()/1e9;
         std::cout<<"Finished Loading RSMI-NoNN"<<std::endl;
 
         ifstream build_time_file(PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/RSMI/"+query_agnostic_tree_name+".time",ios::in);
@@ -1211,6 +1331,36 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="RSMI";
         log_json["build_time"] = rsmi_tree_build_time;
+
+        // Read from a .time file written by RSMI.py, covering TrainRSMINode --
+        // NN fitting plus tree serialization, in a separate Python process. It
+        // excludes the dataset load there and the .tree load here, so it is not
+        // the same measurement as every other row's build_time. The accounting
+        // flag is what stops the two being averaged together downstream.
+        CurrentBuildProfile().accounting = BuildAccounting::kOfflinePython;
+        CurrentBuildProfile().learn_s    = rsmi_tree_build_time;
+        CurrentBuildProfile().serialize_s = rsmi_tree_load_seconds;
+
+        // Optional companion written by RSMI.py. Absent for trees trained before
+        // the trainer was instrumented, so a miss is silent rather than fatal --
+        // the counters simply stay zero, which is what they meant before anyway.
+        {
+            ifstream node_stats_file(PROJECT_ROOT+"Experiments/"+dataset_folder_name+
+                                     "/TrainedIndexes/RSMI/"+query_agnostic_tree_name+".nodes");
+            if(node_stats_file.good()){
+                try{
+                    json node_stats; node_stats_file>>node_stats;
+                    CurrentBuildProfile().learned_nodes  = node_stats.value("learned_nodes", 0);
+                    CurrentBuildProfile().fallback_nodes = node_stats.value("fallback_nodes", 0);
+                    log_json["build_rsmi_leaf_nodes"]    = node_stats.value("leaf_nodes", 0);
+                    log_json["build_rsmi_nn_fit_s"]      = node_stats.value("nn_fit_seconds", 0.0);
+                }catch(const std::exception& e){
+                    cerr<<"could not parse RSMI .nodes: "<<e.what()<<endl;
+                }
+            }
+        }
+        log_json["build_tree_load_s"] = rsmi_tree_load_seconds;
+        LogBuildProfile(log_json, rsmi_tree_build_time + rsmi_tree_load_seconds);
 
 
         
@@ -1266,6 +1416,7 @@ int main(int argc, char* argv[]){
     {   //############# KDTREE #################
         // Training
         vector<Point> model_datapoints = datapoints;
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         KDTree kd_tree_obj(std::move(model_datapoints));
         auto train_end = std::chrono::high_resolution_clock::now();
@@ -1275,6 +1426,7 @@ int main(int argc, char* argv[]){
 
         log_json["model"]="KD";
         log_json["build_time"] = kd_tree_build_time;
+        LogBuildProfile(log_json, kd_tree_build_time);
 
 
         //################## Query Processing Count Based ##################
@@ -1335,20 +1487,25 @@ int main(int argc, char* argv[]){
         // Training
         vector<Point> trainer_datapoints = datapoints;
         vector<Point> model_datapoints = datapoints;
-        vector<Query> model_queries = countbased_queries;
+        vector<Query> model_queries = TrainingWorkload(countbased_queries, datapoints);
+        // The QDTree construction below used to sit OUTSIDE this window, so QD's
+        // build_time reported the search only while every other index reported
+        // search plus construction. Materializing the winning tree is part of
+        // building the index, so it is timed here like everywhere else.
+        ResetBuildProfile();
         auto train_start = std::chrono::high_resolution_clock::now();
         QDTreeTrainerRandomSearch(std::move(trainer_datapoints),model_queries,PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/QDTree/"+tree_name+"_areabased.txt");
-        auto train_end = std::chrono::high_resolution_clock::now();
-        
-        double_t qd_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
-        
         QDTree qd_tree_obj(std::move(model_datapoints),PROJECT_ROOT+"Experiments/"+dataset_folder_name+"/TrainedIndexes/QDTree/"+tree_name+"_areabased.txt");
+        auto train_end = std::chrono::high_resolution_clock::now();
+
+        double_t qd_tree_build_time = chrono::duration_cast<chrono::nanoseconds>(train_end - train_start).count()/1000000000.0;
 
 
 
         log_json["model"]="QD";
         log_json["build_time"] = qd_tree_build_time;
+        LogBuildProfile(log_json, qd_tree_build_time);
 
         //################## Query Processing Area Based ##################
         log_json["area_or_count_based"]="count";
