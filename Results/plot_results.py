@@ -234,14 +234,52 @@ def sci_notation(number: float, sig_fig: int = 1) -> str:
     return "$" + significand + r"\times 10^" + str(int(exponent)) + "$"
 
 
-def load_results(result_path: Path, pickle_path: Path) -> pd.DataFrame:
+def load_results(result_path: Path, pickle_path: Path,
+                 disk_fraction: float | None = None) -> pd.DataFrame:
+    """Load one concatenated results file into the frame the figures expect.
+
+    `disk_backed_query_latency` used to be the mmap pass. The evaluator no longer
+    runs one: mmap could not be given a memory budget, so it reported the OS page
+    cache rather than a disk-resident index, and the buffer-pool backend answers
+    the same question with a budget attached. The column therefore now carries the
+    buffer pool at ONE chosen budget fraction, selected here rather than averaged,
+    because averaging budgets is what the old two-file split existed to prevent.
+
+    Which fraction is a reporting decision, not a detail -- it sets how much of the
+    index is allowed to be resident in every "disk backed" figure in the paper. It
+    is printed at load time and settable with --disk-fraction.
+
+    Rows whose block size is below the page capacity carry no pool data at all and
+    get NaN here, so they drop out of the disk-backed figures while still counting
+    in the in-memory ones.
+    """
     if pickle_path.is_file() and pickle_path.stat().st_mtime >= result_path.stat().st_mtime:
         return pd.read_pickle(pickle_path)
 
+    chosen_fraction = None
     rows = []
     with result_path.open() as json_file:
         for _, line in tqdm(enumerate(json_file), desc=f"Loading {result_path.name}"):
             data = json.loads(line)
+
+            budgets = {b["bufferpool_fraction"]: b for b in data.get("disk_backed_results", [])}
+            if budgets:
+                if chosen_fraction is None:
+                    chosen_fraction = (disk_fraction if disk_fraction is not None
+                                       else max(budgets))
+                    print(f"disk-backed columns taken from the buffer pool at "
+                          f"fraction {chosen_fraction:g} of the index file")
+                budget = budgets.get(chosen_fraction)
+                if budget is None:
+                    raise SystemExit(
+                        f"no buffer-pool row at fraction {chosen_fraction:g}; "
+                        f"available: {sorted(budgets)}")
+                data["disk_backed_result_size"] = budget["bp_result_size"]
+                data["disk_backed_query_latency"] = budget["bp_query_latency"]
+            else:
+                data["disk_backed_result_size"] = float("nan")
+                data["disk_backed_query_latency"] = float("nan")
+
             row = {}
             for feature in [
                 "block_size",
@@ -2352,6 +2390,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable LaTeX rendering for environments without a TeX installation.",
     )
+    parser.add_argument(
+        "--disk-fraction",
+        type=float,
+        default=None,
+        help=("Buffer-pool budget, as a fraction of the index file, to report in the "
+              "disk-backed figures. Defaults to the largest fraction present. This "
+              "replaces the mmap pass, which no longer runs."),
+    )
     return parser.parse_args()
 
 
@@ -2369,7 +2415,7 @@ def main() -> None:
     result_path = args.data_dir / "Results.json"
     pickle_path = args.data_dir / "Results.pkl"
 
-    raw_df = load_results(result_path, pickle_path)
+    raw_df = load_results(result_path, pickle_path, args.disk_fraction)
     df = prepare_results(raw_df, args.query_gen_policy)
 
     (
@@ -2418,7 +2464,8 @@ def main() -> None:
     validation_report_path = None
     if validation_path.is_file():
         validation_pickle_path = validation_path.with_suffix(".pkl")
-        validation_raw_df = load_results(validation_path, validation_pickle_path)
+        validation_raw_df = load_results(validation_path, validation_pickle_path,
+                                         args.disk_fraction)
         validation_report_path = write_real_world_validation_analysis(
             raw_df,
             validation_raw_df,

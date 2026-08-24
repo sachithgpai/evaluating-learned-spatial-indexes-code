@@ -113,11 +113,11 @@ class BlockStore{
                     active_ = mem_backend_.get();
                     break;
                 case StorageMode::kMmap:
-                    assert(mmap_backend_ && "FinishedConstruction() must run before switching to the mmap backend");
+                    assert(mmap_backend_ && "ENABLE_MMAP_BACKEND=1 and MaterializeDiskBackends() are needed for the mmap backend");
                     active_ = mmap_backend_.get();
                     break;
                 case StorageMode::kBufferPool:
-                    assert(paged_backend_ && "ENABLE_PAGED_BACKEND=1 must be set before FinishedConstruction()");
+                    assert(paged_backend_ && "ENABLE_PAGED_BACKEND=1 and MaterializeDiskBackends() are needed for the paged backend");
                     active_ = paged_backend_.get();
                     break;
             }
@@ -242,27 +242,54 @@ class BlockStore{
         }
 
         /**
-         * Finalize the block store: materialize the disk-backed representations.
+         * Seal the block store: no more blocks, in-memory contents final.
          *
-         * Called once, as the last step of each index's construction, while the
-         * in-memory blocks are still resident. The store is read-only afterwards.
+         * Called once, as the last step of each index's construction. It used to
+         * write both disk representations here, which put the whole materialization
+         * -- a page-by-page write of the entire index plus an fsync -- inside the
+         * constructor, and therefore inside the build_time interval the evaluator
+         * measures around it. At BLOCK_SIZE=32 that is 1 GB per index (a block never
+         * shares a page, so 32 records occupy a full 4096-byte page), which is device
+         * throughput being reported as index construction cost.
+         *
+         * Materialization now happens in MaterializeDiskBackends(), called after the
+         * build timer has stopped. This function stays because all nineteen call
+         * sites are correct about *when* construction ends; only what it triggered
+         * was wrong.
          */
         void FinishedConstruction(){
-            mmap_backend_ = std::make_unique<MmapBackend>();
-            mmap_backend_->Build(block_list_, block_point_counts_);
+            construction_finished_ = true;
+        }
 
-            // Off unless ENABLE_PAGED_BACKEND=1, so a default run writes exactly the
-            // files it always did.
-            if(PagedBackendEnabled()){
+        /**
+         * Write the disk-backed representations. Idempotent.
+         *
+         * Deliberately not called from any constructor. The single caller is the
+         * evaluator's storage-pass routine, which runs after every build timer has
+         * stopped -- so it is structurally impossible for this cost to re-enter
+         * build_time, rather than merely absent by convention.
+         *
+         * Idempotence is what lets FLOOD's and QD's random searches call
+         * FinishedConstruction() on discarded candidate trees without consequence.
+         */
+        void MaterializeDiskBackends(){
+            assert(construction_finished_ && "FinishedConstruction() must run first");
+
+            if(MmapBackendEnabled() && !mmap_backend_){
+                mmap_backend_ = std::make_unique<MmapBackend>();
+                mmap_backend_->Build(block_list_, block_point_counts_);
+            }
+
+            if(PagedBackendEnabled() && !paged_backend_){
                 paged_backend_ = std::make_unique<PagedDiskBackend>(PagedGeometryFromEnv());
                 paged_backend_->Build(block_list_, block_point_counts_);
             }
         }
 
-        /** The mmap backend, or nullptr before FinishedConstruction() has run. */
+        /** The mmap backend, or nullptr until MaterializeDiskBackends() has built one. */
         const MmapBackend* MmapBackendPtr() const { return mmap_backend_.get(); }
 
-        /** The paged backend, or nullptr when it was not enabled. */
+        /** The paged backend, or nullptr when it was not enabled or not yet built. */
         PagedDiskBackend* PagedBackendPtr() const { return paged_backend_.get(); }
 
 
@@ -275,6 +302,7 @@ class BlockStore{
         std::unique_ptr<MmapBackend> mmap_backend_;
         std::unique_ptr<PagedDiskBackend> paged_backend_;
         PointStorageBackend* active_{nullptr};
+        bool construction_finished_{false};
 };
 
 

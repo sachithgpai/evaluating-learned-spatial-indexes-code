@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
-"""Two figures comparing the storage backends, from the bp_*.jsonl / *.jsonl pair.
+"""Two figures comparing mmap against the managed buffer pool.
+
+ARCHIVE-ONLY. These figures need an mmap latency per index, and the evaluator no
+longer runs an mmap pass -- that was the point of the comparison, and having made
+it, paying for a second full copy of every index on disk to keep re-making it was
+not worth it. The script therefore reads the previous two-file layout
+(`<n>.jsonl` + `bp_<n>.jsonl`, with `disk_backed_query_latency` and separate
+cold/warm columns), which now lives in `OLD_ResultsFolder/`.
+
+It is kept rather than deleted because it is the evidence for a design decision
+the paper states: that the page cache cannot be given a memory budget, and what
+replacing it costs. Do not point it at a current ResultsFolder -- the numbers are
+not the same measurement (that pass was warm, the current one is cold).
 
 Usage:
-    python3 Results/plot_backend_comparison.py Experiments/<dataset>/ResultsFolder [outdir]
+    python3 Results/plot_backend_comparison.py Experiments/<dataset>/OLD_ResultsFolder [outdir]
 """
 
 from __future__ import annotations
@@ -22,7 +34,7 @@ from matplotlib.lines import Line2D
 # the all-pairs pairlist in light mode: worst CVD dE 9.2 (deutan, target >= 8),
 # worst normal-vision dE 16.3 (floor 15). Aqua sits at 2.74:1 on this surface,
 # below the 3:1 bar, so the relief rule applies -- every series is direct-labelled
-# and the CSV/table view exists via compare_mmap_vs_bufferpool.py --csv.
+# and every series is direct-labelled in the figures themselves.
 SURFACE = "#fcfcfb"
 INK, INK_2, GRID = "#0b0b0b", "#52514e", "#d8d7d2"
 TYPE_COLOR = {"GRID": "#2a78d6", "SPACE": "#eb6834", "DATA": "#1baf7a", "ORDER": "#4a3aa7"}
@@ -53,8 +65,14 @@ def load(results_dir: Path):
     for path in sorted(results_dir.glob("*.jsonl")):
         rows = [json.loads(line) for line in path.open() if line.strip()]
         (bp if path.name.startswith("bp_") else results).extend(rows)
-    if not results or not bp:
-        raise SystemExit(f"need both *.jsonl and bp_*.jsonl in {results_dir}")
+    if not bp:
+        raise SystemExit(
+            f"no bp_*.jsonl in {results_dir}.\n"
+            "This script reads the archived two-file layout only -- point it at "
+            "OLD_ResultsFolder/. Current results nest their buffer-pool rows inside "
+            "each index row and carry no mmap pass; see Results/results_io.py.")
+    if not results:
+        raise SystemExit(f"no index rows (*.jsonl) in {results_dir}")
     mmap_lat = {r["model"]: r["disk_backed_query_latency"] for r in results}
     by_model = defaultdict(list)
     for row in bp:

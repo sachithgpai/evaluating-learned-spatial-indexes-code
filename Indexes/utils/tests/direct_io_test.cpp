@@ -99,6 +99,7 @@ static bool RunSweep(const std::vector<Point>& data, std::vector<Query>& queries
                      const double* fractions, size_t fraction_count,
                      bool expect_direct, std::vector<PassRecord>& out){
     KDTree index(data);
+    index.block_store_.MaterializeDiskBackends();
     PagedDiskBackend* paged = index.block_store_.PagedBackendPtr();
     if(!paged){
         std::cout<<"FAILED: paged backend not built -- set ENABLE_PAGED_BACKEND=1\n";

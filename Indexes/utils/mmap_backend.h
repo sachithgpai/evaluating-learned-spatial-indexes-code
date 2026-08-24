@@ -35,6 +35,24 @@
 #include"sort_tools.h"
 
 
+/**
+ * True when the mmap backend should be materialized at all. Off by default.
+ *
+ * The evaluator no longer times an mmap pass: the buffer-pool backend answers
+ * the same question with a memory budget attached, which the page cache cannot
+ * give. Building the mapping anyway cost a full copy of the point data on disk
+ * -- 128 MB per index at 8M points -- written inside every index's construction
+ * window and charged to build_time, for a file nothing read.
+ *
+ * The backend itself is untouched and still selectable; VERIFY_BACKENDS turns it
+ * back on so the three-way fingerprint check has an mmap column to compare.
+ */
+inline bool MmapBackendEnabled(){
+    const char* flag = std::getenv("ENABLE_MMAP_BACKEND");
+    return flag != nullptr && std::string(flag) == "1";
+}
+
+
 class MmapBackend: public PointStorageBackend{
     public:
         MmapBackend() = default;

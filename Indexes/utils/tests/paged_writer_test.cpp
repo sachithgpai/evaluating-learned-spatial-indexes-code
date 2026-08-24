@@ -10,6 +10,7 @@
  *   ENABLE_PAGED_BACKEND=1 TEMP_BLOCKSTORE_DIR=/tmp/bs ./paged_writer_test
  */
 
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -43,6 +44,12 @@ static void FillStore(BlockStore& store, std::vector<std::vector<Point>>& truth,
 
 
 int main(){
+    // This test asserts that all three backends return the same points, so it
+    // turns the mmap backend on itself rather than inheriting it. The evaluator
+    // leaves it off (no mmap pass is timed any more), which would otherwise make
+    // the outcome depend on the caller's environment.
+    setenv("ENABLE_MMAP_BACKEND", "1", 1);
+
     std::mt19937 rng(90210);
     std::uniform_real_distribution<double_t> d(0.0, 1000.0);
 
@@ -60,6 +67,7 @@ int main(){
     std::vector<std::vector<Point>> truth;
     FillStore(store, truth, data, sizes);
     store.FinishedConstruction();
+    store.MaterializeDiskBackends();
 
     PagedDiskBackend* paged = store.PagedBackendPtr();
     if(!paged){

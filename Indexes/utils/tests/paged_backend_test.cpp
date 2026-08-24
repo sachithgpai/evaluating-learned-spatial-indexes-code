@@ -7,6 +7,7 @@
  *   ENABLE_PAGED_BACKEND=1 TEMP_BLOCKSTORE_DIR=/tmp/bs ./paged_backend_test
  */
 
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -37,6 +38,12 @@ static bool SamePoints(const std::vector<Point>& a, const std::vector<Point>& b)
 
 
 int main(){
+    // This test asserts that all three backends return the same points, so it
+    // turns the mmap backend on itself rather than inheriting it. The evaluator
+    // leaves it off (no mmap pass is timed any more), which would otherwise make
+    // the outcome depend on the caller's environment.
+    setenv("ENABLE_MMAP_BACKEND", "1", 1);
+
     BLOCK_SIZE = 256;
 
     // Clustered rather than uniform, so leaf occupancy actually varies -- KDTree
@@ -51,6 +58,7 @@ int main(){
     }
 
     KDTree index(data);
+    index.block_store_.MaterializeDiskBackends();
     PagedDiskBackend* paged = index.block_store_.PagedBackendPtr();
     if(!paged){
         std::cout<<"FAILED: paged backend not built -- set ENABLE_PAGED_BACKEND=1\n";

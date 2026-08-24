@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Per-index analysis figures from the <n>.jsonl / bp_<n>.jsonl pair.
+"""Per-index analysis figures from the evaluator's <n>.jsonl files.
 
 Complements plot_backend_comparison.py, which aggregates across indexes. These
 five figures keep the index identity:
 
-  1. backend_latency_by_index   in-memory vs mmap vs buffer pool, per index
+  1. backend_latency_by_index   in-memory vs buffer pool, per index
   2. index_ranking              page misses per query, per index, per budget
   3. why_latency_tracks_misses  the scatter + the I/O share behind it
   4. budget_sensitivity         what shrinking the memory budget costs
@@ -25,11 +25,15 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+
+import results_io
 
 # --- design tokens -----------------------------------------------------------
 # Reused verbatim from plot_backend_comparison.py so the two scripts render as
@@ -48,7 +52,7 @@ INDEX_TYPE = {"CUR": "DATA", "FLOOD": "GRID", "RSTAR": "DATA", "STR": "DATA",
               "KD": "SPACE", "QD": "SPACE", "RSMI": "DATA", "RW": "DATA"}
 
 # Backends are an identity encoding, so fixed order, never cycled.
-BACKEND_COLOR = {"in-memory": "#2a78d6", "mmap": "#eb6834", "buffer pool": "#1baf7a"}
+BACKEND_COLOR = {"in-memory": "#2a78d6", "buffer pool": "#1baf7a"}
 
 # Build-cost phases. The two components R4 asked about carry hue; plain structural
 # work recedes to neutral, because it is the control rather than the finding. A
@@ -79,14 +83,6 @@ def recessive(ax, axis="x") -> None:
     ax.set_axisbelow(True)
 
 
-def load(results_dir: Path):
-    main, bp = [], []
-    for path in sorted(results_dir.glob("*.jsonl")):
-        rows = [json.loads(line) for line in path.open() if line.strip()]
-        (bp if path.name.startswith("bp_") else main).extend(rows)
-    if not main or not bp:
-        raise SystemExit(f"need both *.jsonl and bp_*.jsonl in {results_dir}")
-    return main, bp
 
 
 def med(rows, key):
@@ -116,29 +112,34 @@ def family_legend(fig, ncol=4, y=0.015) -> None:
 
 
 # --- figure 1 ----------------------------------------------------------------
-def figure_backend_latency(by_model, by_model_frac, fraction, out: Path) -> None:
-    """In-memory and mmap differ by a few percent; the pool is two orders away."""
-    models = sorted(by_model, key=lambda m: med(by_model[m], "query_latency"))
+def figure_backend_latency(by_model_frac, fraction, out: Path) -> None:
+    """The pool is two orders of magnitude off the in-memory scan."""
+    # Both series come from by_model_frac, not one from each dict. The flattened
+    # budget rows carry their parent's query_latency, so the two bars describe the
+    # same tasks -- which matters now that block sizes below the page capacity
+    # produce an in-memory row and no pool row, and would otherwise have put a
+    # different population behind each bar.
+    models = sorted({m for m, _ in by_model_frac},
+                    key=lambda m: med(by_model_frac[(m, fraction)], "query_latency"))
     y = range(len(models))
-    h = 0.26
+    h = 0.34
 
     fig, ax = plt.subplots(figsize=(PAGE_FIT * 0.62, 0.34 * len(models) + 1.5))
     series = [
-        ("in-memory", lambda m: med(by_model[m], "query_latency") / 1000),
-        ("mmap", lambda m: med(by_model[m], "disk_backed_query_latency") / 1000),
-        ("buffer pool", lambda m: med(by_model_frac[(m, fraction)], "bp_warm_query_latency") / 1000),
+        ("in-memory", lambda m: med(by_model_frac[(m, fraction)], "query_latency") / 1000),
+        ("buffer pool", lambda m: med(by_model_frac[(m, fraction)], "bp_query_latency") / 1000),
     ]
     for si, (name, fn) in enumerate(series):
         vals = [fn(m) for m in models]
-        offs = [i + (1 - si) * h for i in y]
+        offs = [i + (0.5 - si) * h for i in y]
         ax.barh(offs, vals, height=h * 0.88, color=BACKEND_COLOR[name],
                 label=name, zorder=3, linewidth=0)
 
-    # One selective label per index: the multiple that matters, not 36 numbers.
+    # One selective label per index: the multiple that matters, not 24 numbers.
     for i, m in enumerate(models):
-        inmem = med(by_model[m], "query_latency") / 1000
-        pool = med(by_model_frac[(m, fraction)], "bp_warm_query_latency") / 1000
-        ax.text(pool * 1.25, i - h, f"{pool / inmem:.0f}×", va="center",
+        inmem = med(by_model_frac[(m, fraction)], "query_latency") / 1000
+        pool = med(by_model_frac[(m, fraction)], "bp_query_latency") / 1000
+        ax.text(pool * 1.25, i - h / 2, f"{pool / inmem:.0f}×", va="center",
                 ha="left", fontsize=7, color=INK_2)
 
     ax.set_yticks(list(y))
@@ -147,7 +148,7 @@ def figure_backend_latency(by_model, by_model_frac, fraction, out: Path) -> None
     ax.set_xscale("log")
     ax.set_xlim(20, 34000)
     ax.set_xlabel("median query latency (µs, log)")
-    ax.set_title("Only the buffer pool actually reaches the device", loc="left")
+    ax.set_title("Reaching the device costs two orders of magnitude", loc="left")
     recessive(ax)
     fig.suptitle(f"Query latency by storage backend  (pool at {fraction:g} of index file)",
                  x=0.005, ha="left", fontsize=10, fontweight="bold")
@@ -155,7 +156,7 @@ def figure_backend_latency(by_model, by_model_frac, fraction, out: Path) -> None
     # Below the panel, not inside it: at this aspect every interior corner is
     # either bar or value label.
     fig.legend(handles=[Patch(facecolor=BACKEND_COLOR[n], label=n) for n, _ in series],
-               loc="lower center", ncol=3, bbox_to_anchor=(0.5, 0.015))
+               loc="lower center", ncol=2, bbox_to_anchor=(0.5, 0.015))
     save(fig, out)
 
 
@@ -210,16 +211,19 @@ def figure_latency_vs_misses(by_model_frac, fractions, out: Path) -> None:
     models = sorted({m for m, _ in by_model_frac})
     fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(PAGE_FIT, 3.3))
 
-    marks = {fractions[0]: "o", fractions[1]: "s", fractions[2]: "^"}
+    # Cycled, not a fixed three-entry dict: the sweep's fraction count is a config
+    # value and stopped being three when 1.0 was dropped and 0.002 added.
+    marker_cycle = ["o", "s", "^", "D", "v", "P"]
+    marks = {fr: marker_cycle[i % len(marker_cycle)] for i, fr in enumerate(fractions)}
     for fr in fractions:
         xs = [med(by_model_frac[(m, fr)], "bp_page_misses_per_query") for m in models]
-        ys = [med(by_model_frac[(m, fr)], "bp_warm_query_latency") / 1000 for m in models]
+        ys = [med(by_model_frac[(m, fr)], "bp_query_latency") / 1000 for m in models]
         ax_l.scatter(xs, ys, s=34, marker=marks[fr], zorder=3, linewidth=0.8,
                      edgecolor=SURFACE,
                      color=[TYPE_COLOR[INDEX_TYPE[m]] for m in models],
                      label=f"{fr:g}  (ρ={spearman(xs, ys):.3f})")
     ax_l.set_xlabel("page misses per query")
-    ax_l.set_ylabel("warm query latency (µs)")
+    ax_l.set_ylabel("query latency (µs)")
     ax_l.set_title("Latency is a straight function of misses", loc="left")
     ax_l.legend(title="budget fraction", loc="upper left", fontsize=7, title_fontsize=7)
     recessive(ax_l, axis="both")
@@ -229,7 +233,7 @@ def figure_latency_vs_misses(by_model_frac, fractions, out: Path) -> None:
     for m in models:
         rows = by_model_frac[(m, fractions[1])]
         shares.append(100 * st.median([r["bp_page_misses_per_query"] * r["device_ns_per_page_p50"]
-                                       / r["bp_warm_query_latency"] for r in rows]))
+                                       / r["bp_query_latency"] for r in rows]))
     order = sorted(range(len(models)), key=lambda i: shares[i])
     ax_r.barh([models[i] for i in order], [shares[i] for i in order], height=0.68,
               zorder=3, linewidth=0,
@@ -260,7 +264,7 @@ def figure_budget_sensitivity(by_model_frac, fractions, out: Path) -> None:
         col = TYPE_COLOR[INDEX_TYPE[m]]
         ax_l.plot(xs, [med(by_model_frac[(m, f)], "bp_page_misses_per_query") for f in xs],
                   color=col, linewidth=2, marker="o", markersize=4, zorder=3, alpha=0.85)
-        ax_r.plot(xs, [med(by_model_frac[(m, f)], "bp_warm_hit_rate") * 100 for f in xs],
+        ax_r.plot(xs, [med(by_model_frac[(m, f)], "bp_hit_rate") * 100 for f in xs],
                   color=col, linewidth=2, marker="o", markersize=4, zorder=3, alpha=0.85)
 
     # Direct-label the extremes only -- 12 labels on each panel would be noise.
@@ -343,30 +347,34 @@ def write_table(by_model, by_model_frac, fractions, out: Path) -> None:
     """The table view the accessibility pass requires -- every plotted number."""
     with out.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["index", "family", "in_memory_us", "mmap_us", "fraction",
-                    "pool_warm_us", "misses_per_query", "pages_per_query",
-                    "warm_hit_rate", "io_share_pct",
+        w.writerow(["index", "family", "in_memory_us", "fraction",
+                    "pool_us", "misses_per_query", "pages_per_query",
+                    "hit_rate", "io_share_pct",
                     "build_total_s", "build_learning_s", "build_workload_aware_s",
-                    "build_construct_s", "build_serialize_s", "build_accounting"])
+                    "build_construct_s", "build_serialize_s", "build_accounting",
+                    "storage_materialize_s"])
         for m in sorted(by_model):
             for fr in fractions:
                 rows = by_model_frac[(m, fr)]
+                if not rows:
+                    continue
                 w.writerow([
                     m, INDEX_TYPE[m],
-                    f"{med(by_model[m], 'query_latency') / 1000:.1f}",
-                    f"{med(by_model[m], 'disk_backed_query_latency') / 1000:.1f}",
+                    f"{med(rows, 'query_latency') / 1000:.1f}",
                     f"{fr:g}",
-                    f"{med(rows, 'bp_warm_query_latency') / 1000:.1f}",
+                    f"{med(rows, 'bp_query_latency') / 1000:.1f}",
                     f"{med(rows, 'bp_page_misses_per_query'):.1f}",
                     f"{med(rows, 'bp_pages_requested_per_query'):.1f}",
-                    f"{med(rows, 'bp_warm_hit_rate'):.3f}",
-                    f"{100 * st.median([r['bp_page_misses_per_query'] * r['device_ns_per_page_p50'] / r['bp_warm_query_latency'] for r in rows]):.1f}",
+                    f"{med(rows, 'bp_hit_rate'):.3f}",
+                    f"{100 * st.median([r['bp_page_misses_per_query'] * r['device_ns_per_page_p50'] / r['bp_query_latency'] for r in rows]):.1f}",
                     f"{med(by_model[m], 'build_total_s'):.2f}",
                     f"{med(by_model[m], 'build_learning_s'):.2f}",
                     f"{med(by_model[m], 'build_workload_awareness_s'):.2f}",
                     f"{med(by_model[m], 'build_construct_s'):.2f}",
                     f"{med(by_model[m], 'build_serialize_s'):.2f}",
                     by_model[m][0]["build_accounting"],
+                    f"{med(by_model[m], 'storage_materialize_s'):.2f}"
+                    if "storage_materialize_s" in by_model[m][0] else "",
                 ])
     print(f"wrote {out}")
 
@@ -378,7 +386,11 @@ def main() -> None:
     outdir = Path(sys.argv[2]) if len(sys.argv) > 2 else results_dir.parent / "figures"
     outdir.mkdir(parents=True, exist_ok=True)
 
-    main_rows, bp_rows = load(results_dir)
+    main_rows, bp_rows = results_io.load(results_dir)
+    skipped = results_io.skipped_counts(main_rows)
+    if skipped:
+        for reason, n in sorted(skipped.items()):
+            print(f"note: {n} index rows carry no buffer-pool data ({reason})")
     by_model = defaultdict(list)
     for r in main_rows:
         by_model[r["model"]].append(r)
@@ -389,11 +401,18 @@ def main() -> None:
     fractions = sorted({f for _, f in by_model_frac}, reverse=True)
     style()
 
-    figure_backend_latency(by_model, by_model_frac, fractions[1],
-                           outdir / "backend_latency_by_index")
-    figure_index_ranking(by_model_frac, fractions, outdir / "index_ranking")
-    figure_latency_vs_misses(by_model_frac, fractions, outdir / "why_latency_tracks_misses")
-    figure_budget_sensitivity(by_model_frac, fractions, outdir / "budget_sensitivity")
+    # Four of the six outputs need buffer-pool rows. A results folder holding only
+    # block sizes below the page capacity has none, by design rather than by
+    # failure, so draw what can be drawn and say what was left out.
+    if fractions:
+        figure_backend_latency(by_model_frac, fractions[0],
+                               outdir / "backend_latency_by_index")
+        figure_index_ranking(by_model_frac, fractions, outdir / "index_ranking")
+        figure_latency_vs_misses(by_model_frac, fractions, outdir / "why_latency_tracks_misses")
+        figure_budget_sensitivity(by_model_frac, fractions, outdir / "budget_sensitivity")
+    else:
+        print("no buffer-pool rows in this results folder; "
+              "skipping the four disk-backed figures")
     figure_build_cost(by_model, outdir / "build_cost")
     write_table(by_model, by_model_frac, fractions, outdir / "index_analysis.csv")
 

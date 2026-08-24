@@ -210,6 +210,13 @@ def main() -> None:
     # storage that accepts O_DIRECT -- point TEMP_BLOCKSTORE_DIR at node-local
     # disk, since Lustre refuses direct reads below 4096 bytes.
     print(1 if config_bool(evaluation_config, "direct_io") else 0)
+    # Line 13: block sizes below this skip the buffer-pool passes entirely. A block
+    # never shares a page, so with the defaults above a block of 256 records fills
+    # a page exactly and anything smaller measures padding -- 8x write
+    # amplification at 32 records, where the miss counts describe the page layout
+    # rather than the index. Those tasks still produce their in-memory rows.
+    print(int(evaluation_config.get("buffer_pool_min_block_size",
+                                    DEFAULT_PAGE_BYTES // DEFAULT_RECORD_BYTES)))
 
 
 if __name__ == "__main__":

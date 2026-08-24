@@ -41,13 +41,14 @@ num_data_entropy_variants="${config_lines[4]}"
 num_query_entropy_variants="${config_lines[5]}"
 single_query_workload_per_sample="${config_lines[6]:-0}"
 
-# Storage-backend settings (lines 8-11). Defaults keep this script working against
+# Storage-backend settings (lines 8-13). Defaults keep this script working against
 # a config file that predates the buffer pool.
 enable_paged_backend="${config_lines[7]:-0}"
 buffer_pool_fractions="${config_lines[8]:-1.0}"
 page_bytes="${config_lines[9]:-4096}"
 record_bytes="${config_lines[10]:-16}"
 direct_io="${config_lines[11]:-0}"
+buffer_pool_min_block_size="${config_lines[12]:-256}"
 
 rm -f "${evaluate_tasks}" "${rsmi_tasks}"
 
@@ -74,6 +75,7 @@ write_evaluation_task() {
             "PAGE_BYTES=${page_bytes}" \
             "RECORD_BYTES=${record_bytes}" \
             "BUFFER_POOL_DIRECT_IO=${direct_io}" \
+            "BUFFER_POOL_MIN_BLOCK_SIZE=${buffer_pool_min_block_size}" \
             "${evaluate_bin}" \
             "${dataset_name}" \
             "${data_sample_num}" \
@@ -236,7 +238,7 @@ cat > "${slurm_evaluate_script}" <<EOF
 #SBATCH --partition=small
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=8000
+#SBATCH --mem=16000
 #SBATCH --time=${evaluation_time_limit}
 #SBATCH --job-name=evaluate-indexes
 #SBATCH --array=1-${evaluation_array_span}
