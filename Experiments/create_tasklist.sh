@@ -201,17 +201,40 @@ max_submit_jobs="${max_submit_jobs:-200}"
 max_elements="${max_submit_jobs}"
 (( max_elements > max_array_span )) && max_elements="${max_array_span}"
 
-# Pick the smallest stride that fits the whole list into max_elements.
-tasks_per_element="${TASKS_PER_ELEMENT:-$(( (evaluation_task_count + max_elements - 1) / max_elements ))}"
+# Small stride, full span, submitted in batches.
+#
+# The previous scheme picked the smallest stride that fit the whole list inside
+# MaxSubmitJobs -- 25 tasks per element, 200 elements, one submission. That made
+# each element a 25-task commitment behind a single walltime, and when the
+# walltime was wrong 60 elements died at once, taking 1500 tasks with them.
+#
+# Five tasks per element over the full 1-1000 span inverts that: an element is a
+# small unit of work, a bad estimate costs five tasks rather than twenty-five,
+# and progress is visible at 1/1000 granularity. The span no longer fits inside
+# MaxSubmitJobs, so it is submitted as batches of ${max_submit_jobs} array
+# indices; the batch plan is printed at the end of this script.
+tasks_per_element="${TASKS_PER_ELEMENT:-5}"
 (( tasks_per_element < 1 )) && tasks_per_element=1
 evaluation_array_span=$(( (evaluation_task_count + tasks_per_element - 1) / tasks_per_element ))
-
+if (( evaluation_array_span > max_array_span )); then
+    echo "Refusing: ${evaluation_task_count} tasks at ${tasks_per_element}/element needs" >&2
+    echo "${evaluation_array_span} array indices, above MaxArraySize-1 (${max_array_span})." >&2
+    echo "Raise TASKS_PER_ELEMENT." >&2
+    exit 1
+fi
+# One submission may hold at most this many elements. The default directive
+# declares the first such batch so a bare `sbatch` is always legal.
+evaluation_batch_size="${max_submit_jobs}"
+(( evaluation_batch_size > evaluation_array_span )) && evaluation_batch_size="${evaluation_array_span}"
 
 # A walltime sized for ONE task would kill an element part-way through its
-# stride. Budget generously per task -- the small run reached ~20 min and the
-# full config runs more fractions over more block sizes -- and clamp to the
-# partition maximum of 3 days.
-minutes_per_eval_task="${MINUTES_PER_EVAL_TASK:-45}"
+# stride. The old 45 min/task was measured against the small run and was simply
+# wrong for the full one: in the archived results the per-task p99 is 66 min at
+# block 256, and that distribution is censored -- tasks slower than the old limit
+# were killed and never recorded, so the real tail is worse than it looks. 120
+# min/task is roughly 2x the observed p99, which at 5 tasks is a 10 h element.
+# Overshooting costs only queue priority; undershooting costs the whole element.
+minutes_per_eval_task="${MINUTES_PER_EVAL_TASK:-120}"
 format_walltime() {
     local minutes="$1"
     (( minutes > 4320 )) && minutes=4320          # 3 days, the 'small' cap
@@ -241,7 +264,7 @@ cat > "${slurm_evaluate_script}" <<EOF
 #SBATCH --mem=16000
 #SBATCH --time=${evaluation_time_limit}
 #SBATCH --job-name=evaluate-indexes
-#SBATCH --array=1-${evaluation_array_span}
+#SBATCH --array=1-${evaluation_batch_size}
 #SBATCH --output=slurm-evaluate-%A_%a.out
 #SBATCH --error=slurm-evaluate-%A_%a.err
 
@@ -291,21 +314,31 @@ echo "TEMP_BLOCKSTORE_DIR=\${TEMP_BLOCKSTORE_DIR}"
 df -hP "\${TEMP_BLOCKSTORE_DIR}" | tail -1
 
 # ---------------------------------------------------------------------------
-# One array element runs a STRIDE of consecutive task lines, not a single task.
+# One array element runs ${tasks_per_element} consecutive task lines.
 #
-# The binding limit is not MaxArraySize (1001, a cap on the index range) but the
-# association's MaxSubmitJobs -- 200 on 'small' -- because Slurm counts every
-# array ELEMENT against it. At one task per element a 5000-line list would need
-# 25 separate submissions drip-fed as the queue drained. At ${tasks_per_element}
-# tasks per element it is ${evaluation_array_span} elements: one submission,
-# inside every limit.
+# Element i covers lines  (i-1)*STRIDE + 1 + OFFSET  ..  i*STRIDE + OFFSET,
+# so the array index alone says which tasks ran -- element 1 is lines 1-${tasks_per_element},
+# element 1000 is lines $(( (evaluation_array_span - 1) * tasks_per_element + 1 ))-${evaluation_task_count}.
+# No offset arithmetic is needed to submit a batch; TASK_OFFSET stays available
+# for resuming against a differently sized list.
 #
-# Element i covers lines  (i-1)*STRIDE + 1 + OFFSET  ..  i*STRIDE + OFFSET.
-# TASK_OFFSET remains available for resuming part-way through a list.
+# THE FULL SPAN IS 1-${evaluation_array_span} AND CANNOT BE SUBMITTED AT ONCE.
+# Slurm counts every array ELEMENT against the association's MaxSubmitJobs
+# (${max_submit_jobs} on 'small'), so a --array=1-${evaluation_array_span} submission is rejected
+# outright. The directive above declares the first batch of ${evaluation_batch_size}; submit the
+# rest by overriding it on the command line as they drain:
 #
-# Size --time for STRIDE tasks, not one: the small run took up to ~20 min per
-# task, so ${tasks_per_element} of them needs hours, and a limit sized for a
-# single task would kill every element part-way through.
+#   sbatch --array=1-${evaluation_batch_size} slurm_evaluate_array.sh
+#   sbatch --array=$(( evaluation_batch_size + 1 ))-$(( evaluation_batch_size * 2 )) slurm_evaluate_array.sh
+#   ... and so on to ${evaluation_array_span}
+#
+# Note MaxJobs (100) caps how many RUN at once, while MaxSubmitJobs (${max_submit_jobs}) caps
+# how many are on the books; a full batch therefore keeps ${max_submit_jobs} queued behind the
+# running ones, so the queue never drains to empty between batches.
+#
+# Size --time for STRIDE tasks, not one. See the walltime note in
+# create_tasklist.sh: ${minutes_per_eval_task} min/task is ~2x the archived p99, and that
+# archive is censored by the previous run's own timeouts.
 # ---------------------------------------------------------------------------
 stride="\${TASKS_PER_ELEMENT:-${tasks_per_element}}"
 offset="\${TASK_OFFSET:-0}"
@@ -400,4 +433,18 @@ chmod +x "${rsmi_line_runner}"
 echo "Wrote ${evaluation_task_count} evaluation tasks to ${evaluate_tasks}"
 echo "Wrote ${rsmi_task_count} RSMI tasks to ${rsmi_tasks}"
 echo "Wrote Slurm evaluation array script to ${slurm_evaluate_script}"
+echo
+echo "Evaluation array: ${evaluation_task_count} tasks, ${tasks_per_element} per element,"
+echo "  ${evaluation_array_span} elements, --time=${evaluation_time_limit}."
+echo "MaxSubmitJobs is ${max_submit_jobs}, so submit in batches of ${evaluation_batch_size}:"
+batch_start=1
+while (( batch_start <= evaluation_array_span )); do
+    batch_end=$(( batch_start + evaluation_batch_size - 1 ))
+    (( batch_end > evaluation_array_span )) && batch_end="${evaluation_array_span}"
+    printf '    sbatch --array=%d-%d slurm_evaluate_array.sh   # task lines %d-%d\n' \
+        "${batch_start}" "${batch_end}" \
+        "$(( (batch_start - 1) * tasks_per_element + 1 ))" \
+        "$(( batch_end * tasks_per_element > evaluation_task_count ? evaluation_task_count : batch_end * tasks_per_element ))"
+    batch_start=$(( batch_end + 1 ))
+done
 echo "Wrote Slurm RSMI array script to ${slurm_rsmi_script}"

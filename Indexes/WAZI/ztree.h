@@ -388,10 +388,20 @@ class ZTree{
 
         void ProjectionBasic(std::vector<size_t> &projected_cells,Query & query){
             
+            if(leaf_list_.empty()) return;
+
             size_t start_iter = (LeafNodeForPoint(query.low_))->leaf_id_;
             size_t end_iter = (LeafNodeForPoint(query.high_))->leaf_id_;
             end_iter++;
-
+            // The ++ deliberately includes the leaf after the one holding
+            // query.high_, but nothing clamped it. When query.high_ lands in the
+            // LAST leaf, end_iter becomes leaf_list_.size() and the `<=` loop
+            // below reads leaf_list_[leaf_list_.size()] -- adjacent heap memory
+            // interpreted as an MBR. If that garbage happens to overlap, the
+            // out-of-range index is pushed as a block id, and Scan then reads
+            // first_page_[out_of_range]: a coordinate reinterpreted as a page id,
+            // which pread rejects with EINVAL.
+            if(end_iter >= leaf_list_.size()) end_iter = leaf_list_.size()-1;
 
             for(size_t it=start_iter;it<=end_iter;it++,metric_mbrs_checked_++)
                 if(query.IsThereOverlap(leaf_list_[it].mbr_))

@@ -340,6 +340,12 @@ class PagedDiskBackend: public PointStorageBackend{
                 throw std::runtime_error("PagedDiskBackend::Scan: Build() has not run");
 
             for(const size_t& block_id: block_ids){
+                // Fail loudly on a bad id. Without this an out-of-range block id
+                // silently reads adjacent heap as a page number, and the first
+                // sign of trouble is an EINVAL from pread on a nonsense page.
+                if(block_id >= block_point_counts_.size())
+                    throw std::runtime_error("PagedDiskBackend::Scan: block id "+std::to_string(block_id)+
+                                             " is out of range (blocks="+std::to_string(block_point_counts_.size())+")");
                 size_t remaining = block_point_counts_[block_id];
                 if(!remaining)
                     continue;
