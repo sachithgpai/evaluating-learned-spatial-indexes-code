@@ -25,9 +25,77 @@ except ImportError:
     COLOR_SEQUENCE = sb.color_palette("tab20", n_colors=12).as_hex()
 
 
+# Experiment geometry.
+#
+# These three were hardcoded, and one of them drifted: the evaluator's query
+# count moved 5000 -> 1000 while the divisors here did not, which silently
+# rescaled every per-query quantity. They are now read from experiment_config
+# .json -- the same file the task-list generator reads -- so the plots cannot
+# disagree with the run that produced them. configure_experiment() fills them
+# in from main(); the values below are only a fallback for the historical
+# 8M/5000-query archives.
 N_POINTS = 8_000_000
+N_QUERIES = 5_000
 DEFAULT_SELECTIVITY = 0.1024
+
+# The `selectivity` column is the target fraction expressed as a PERCENT: the
+# task tag is round(fraction * 1e6) (see Experiments/read_experiment_config.py,
+# SELECTIVITY_SCALE) and load_results divides that tag by 1e4. So converting a
+# selectivity back to points-per-query is N_POINTS * selectivity / 100, which is
+# what SELECTIVITY_PERCENT_SCALE names. The previous form, `8.0 * 10e4 *
+# selectivity`, was 10x too large: 10e4 is 1e5, not 1e4.
+SELECTIVITY_PERCENT_SCALE = 100.0
+
+# The integer scale the task tags use, mirroring SELECTIVITY_SCALE in
+# Experiments/read_experiment_config.py: tag = round(fraction * 1e6).
+SELECTIVITY_TAG_SCALE = 1_000_000
+
 REDEMPTION_BASE_MODEL = "CUR"
+
+# Bumped whenever load_results changes shape or arithmetic. Results.pkl is
+# otherwise reused purely on mtime, so a fix to the loader would be silently
+# ignored in favour of a cache built by the buggy version.
+LOADER_VERSION = 3
+
+
+def load_experiment_geometry(config_path: Path, experiment_name: str | None) -> tuple[int, int, float]:
+    """Return (n_points, n_queries, default_selectivity) from experiment_config.json."""
+    with config_path.open() as config_file:
+        config = json.load(config_file)
+
+    name = experiment_name or config.get("default_experiment")
+    experiments = config.get("experiments", {})
+    if name not in experiments:
+        raise SystemExit(
+            f"experiment '{name}' not found in {config_path}; "
+            f"available: {sorted(experiments)}")
+    experiment = experiments[name]
+
+    n_points = int(experiment["n_points"])
+    n_queries = int(experiment["n_queries"])
+
+    # The middle target fraction, matching the previous hardcoded 0.1024 for the
+    # 5-fraction synthetic sweep.
+    #
+    # Derived through the SAME arithmetic load_results uses -- integer task tag
+    # divided by 1e4 -- and deliberately not as fraction * 100. Those two agree
+    # mathematically and differ in floating point (0.001024 * 100 is
+    # 0.10239999999999999), and five call sites filter with `== DEFAULT_
+    # SELECTIVITY`, so a one-ulp gap would silently empty their frames rather
+    # than raise anything.
+    fractions = sorted(float(f) for f in experiment["target_fractions"])
+    middle = fractions[len(fractions) // 2]
+    default_selectivity = round(middle * SELECTIVITY_TAG_SCALE) / 10000.0
+
+    return n_points, n_queries, default_selectivity
+
+
+def configure_experiment(n_points: int, n_queries: int, default_selectivity: float) -> None:
+    """Publish the experiment geometry to the module-level constants."""
+    global N_POINTS, N_QUERIES, DEFAULT_SELECTIVITY
+    N_POINTS = n_points
+    N_QUERIES = n_queries
+    DEFAULT_SELECTIVITY = default_selectivity
 MAX_USEFUL_LATENCY_RATIO = 1.5
 INDEX_USEFULNESS_TOP_K = 3
 INDEX_USEFULNESS_MAX_DEPTH = 2
@@ -253,8 +321,22 @@ def load_results(result_path: Path, pickle_path: Path,
     get NaN here, so they drop out of the disk-backed figures while still counting
     in the in-memory ones.
     """
+    # The cache is keyed on the loader's arithmetic as well as the data's mtime.
+    # Freshness alone is not enough: the columns below are computed with the
+    # experiment geometry baked in, so a cache built by an older loader -- or
+    # under a different n_queries -- would silently outlive the fix that
+    # invalidated it.
     if pickle_path.is_file() and pickle_path.stat().st_mtime >= result_path.stat().st_mtime:
-        return pd.read_pickle(pickle_path)
+        cached = pd.read_pickle(pickle_path)
+        stamp = (cached.attrs.get("loader_version"), cached.attrs.get("n_queries"),
+                 cached.attrs.get("n_points"), cached.attrs.get("disk_fraction_requested"))
+        if stamp == (LOADER_VERSION, N_QUERIES, N_POINTS, disk_fraction):
+            print(f"disk-backed columns taken from the buffer pool at fraction "
+                  f"{cached.attrs.get('disk_fraction_resolved'):g} of the index file (cached)")
+            return cached
+        print(f"ignoring stale {pickle_path.name} (built by loader {stamp[0]} with "
+              f"n_queries={stamp[1]}, n_points={stamp[2]}, "
+              f"--disk-fraction {stamp[3]}); rebuilding")
 
     chosen_fraction = None
     rows = []
@@ -304,9 +386,12 @@ def load_results(result_path: Path, pickle_path: Path,
             row["avg_block_size"] = data["block_size_quantiles"][5]
             row["type"] = INDEX_TYPE[data["model"]]
             row["scan_latency"] = row["query_latency"] - row["refinement_latency"]
-            row["query_latency_per_point"] = row["query_latency"] * 5000.0 / row["result_size"]
+            # result_size is a run total while query_latency is already per-query
+            # (evaluate_all_indexes.cpp divides by countbased_queries.size()), so the
+            # divisor is the query count -- not the 5000 this used to hardcode.
+            row["query_latency_per_point"] = row["query_latency"] * N_QUERIES / row["result_size"]
             row["disk_backed_query_latency_per_point"] = (
-                row["disk_backed_query_latency"] * 5000.0 / row["result_size"]
+                row["disk_backed_query_latency"] * N_QUERIES / row["result_size"]
             )
             row["disk_backed_scan_latency"] = (
                 row["disk_backed_query_latency"] - row["refinement_latency"]
@@ -316,6 +401,15 @@ def load_results(result_path: Path, pickle_path: Path,
 
     loaded_df = pd.DataFrame(rows)
     loaded_df["selectivity"] = loaded_df["selectivity"].astype(int) / 10000.0
+    loaded_df.attrs["loader_version"] = LOADER_VERSION
+    loaded_df.attrs["n_queries"] = N_QUERIES
+    loaded_df.attrs["n_points"] = N_POINTS
+    # The budget is baked into disk_backed_*, so a cache built at one fraction must
+    # never be served to a run asking for another. Both the request (possibly None)
+    # and what it resolved to are kept: the request is the cache key, the resolved
+    # value is what gets reported.
+    loaded_df.attrs["disk_fraction_requested"] = disk_fraction
+    loaded_df.attrs["disk_fraction_resolved"] = chosen_fraction
     loaded_df.to_pickle(pickle_path)
     return loaded_df
 
@@ -338,8 +432,10 @@ def prepare_results(df: pd.DataFrame, query_gen_policy: str) -> pd.DataFrame:
         .mean(numeric_only=True)
         .reset_index()
     )
-    df["target"] = 8.0 * 10e4 * df["selectivity"]
-    df["difference_from_target"] = (df["target"] - (df["result_size"] / 5000)) / df["target"]
+    df["target"] = N_POINTS * df["selectivity"] / SELECTIVITY_PERCENT_SCALE
+    df["difference_from_target"] = (
+        df["target"] - (df["result_size"] / N_QUERIES)
+    ) / df["target"]
     return df
 
 
@@ -475,8 +571,11 @@ def build_scan_refinement_df(optimal_measurable_memory: pd.DataFrame) -> pd.Data
 
 def build_access_stats_df(optimal_measurable_memory: pd.DataFrame) -> pd.DataFrame:
     temp_df = optimal_measurable_memory.copy()
+    # number_of_points_scanned is per-query; result_size is a run total. Dividing
+    # by the wrong query count understated the subtrahend and so overstated the
+    # false-positive count.
     temp_df["false_positives"] = temp_df["number_of_points_scanned"] - (
-        temp_df["result_size"] / 5000.0
+        temp_df["result_size"] / N_QUERIES
     )
     temp_df["percent_false_positives"] = temp_df["false_positives"] * 100 / N_POINTS
     temp_df["selectivity_cat"] = temp_df["selectivity"].astype("category")
@@ -769,6 +868,65 @@ def save_figure(fig: plt.Figure, output_path: Path, dpi: int = 400) -> None:
     plt.close(fig)
 
 
+def log_limits(values, pad: float = 0.10) -> tuple[float, float] | None:
+    """Padded (low, high) for a log axis, or None when nothing is plottable.
+
+    `pad` is a fraction of the decade span, so the padding stays visually even
+    however wide the range is.
+    """
+    series = pd.Series(values).replace([np.inf, -np.inf], np.nan).dropna()
+    series = series[series > 0]
+    if series.empty:
+        return None
+    low, high = float(series.min()), float(series.max())
+    if low == high:
+        return low / 1.5, high * 1.5
+    factor = 10 ** (np.log10(high / low) * pad)
+    return low / factor, high * factor
+
+
+def log_ticks(low: float, high: float, limit: int = 4) -> list[float]:
+    """Round tick values lying inside (low, high) on a log axis.
+
+    The mantissa ladder is denser than the usual 1/2/5 because these panels often
+    span well under a decade -- buffer-pool latencies at one budget sit inside
+    roughly [1.3, 4.7] ms, where 1/2/5 yields a single tick and an unreadable axis.
+    """
+    ladder = (1, 1.5, 2, 3, 5, 7)
+    ticks = []
+    exponent = int(np.floor(np.log10(low)))
+    while exponent <= int(np.ceil(np.log10(high))) + 1:
+        for mantissa in ladder:
+            value = mantissa * 10.0 ** exponent
+            if value > high:
+                return _thin_ticks(ticks, limit)
+            if value >= low:
+                ticks.append(value)
+        exponent += 1
+    return _thin_ticks(ticks, limit)
+
+
+def _thin_ticks(ticks: list[float], limit: int) -> list[float]:
+    """Keep at most `limit` ticks, dropping every other one until it fits."""
+    while len(ticks) > limit:
+        ticks = ticks[::2]
+    return ticks
+
+
+def disk_backed_block_sizes(df: pd.DataFrame) -> list[int]:
+    """Block sizes that carry buffer-pool measurements at all.
+
+    Blocks below BUFFER_POOL_MIN_BLOCK_SIZE (256 records in the current runs) are
+    smaller than the page capacity, so the evaluator records disk_backed_skipped
+    instead of a pool pass and load_results fills NaN. Plotting them puts empty
+    x positions in every disk-backed panel. Derived from the data rather than
+    hardcoded so it follows the setting the run actually used.
+    """
+    present = df.groupby("block_size")["disk_backed_query_latency"].apply(
+        lambda column: column.notna().any())
+    return [int(block) for block, has_data in present.items() if has_data]
+
+
 def plot_gran_block_size_selectivity(
     df: pd.DataFrame,
     optimal_setting_memory: pd.DataFrame,
@@ -782,7 +940,11 @@ def plot_gran_block_size_selectivity(
     ax2 = plt.subplot(3, 4, 2, sharey=ax1, sharex=ax1)
     ax3 = plt.subplot(3, 4, 3, sharey=ax1, sharex=ax1)
     ax4 = plt.subplot(3, 4, 4, sharey=ax1, sharex=ax1)
-    ax1.set_ylim(top=0.45, bottom=0.075)
+    # Fitted to what this figure plots: `df` at the default selectivity, averaged
+    # over (block_size, model), which spans [0.030, 0.182] ms. An earlier fit used
+    # optimal_measurable_memory -- a different, narrower frame -- and capped the
+    # panel at 0.075, clipping the top of every curve.
+    ax1.set_ylim(top=0.20, bottom=0.028)
 
     ax21 = plt.subplot(3, 4, 5)
     ax22 = plt.subplot(3, 4, 6, sharey=ax21, sharex=ax21)
@@ -817,9 +979,17 @@ def plot_gran_block_size_selectivity(
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
         ax.set_ylabel("Query Latency (ms)" if ix == 0 else None)
+        # sharey=True makes panels 2-4 carry the same scale, but matplotlib still
+        # draws their tick labels; at this panel width those labels run into the
+        # neighbouring panel's frame. Only the leftmost panel needs them.
+        if ix > 0:
+            ax.tick_params(labelleft=False)
         ax.set_xlabel("Avg. Block Size")
-        ax.set_xticks(BLOCK_SIZE_ARRAY[::2], labels=map(str, BLOCK_SIZE_ARRAY[::2]))
-        ax.set_yticks([0.1, 0.2, 0.4], labels=map(str, [0.1, 0.2, 0.4]))
+        # Interior tick positions: an edge tick's label is centred on the panel
+        # boundary, so the last label of one panel and the first of the next
+        # overlap at this width (1.6384 ran into 0.0064).
+        ax.set_xticks(BLOCK_SIZE_ARRAY[1:-1:2], labels=map(str, BLOCK_SIZE_ARRAY[1:-1:2]))
+        ax.set_yticks([0.03, 0.06, 0.12], labels=map(str, [0.03, 0.06, 0.12]))
         ax.set_yticks([], minor=True)
         ax.set_title(TYPE_TITLES[ix], pad=1)
 
@@ -852,8 +1022,16 @@ def plot_gran_block_size_selectivity(
         ax.set_xscale("log", base=2)
         ax.set_yscale("log", base=2)
         ax.set_ylabel("Optimal block sizes" if ix == 0 else None)
+        # sharey=True makes panels 2-4 carry the same scale, but matplotlib still
+        # draws their tick labels; at this panel width those labels run into the
+        # neighbouring panel's frame. Only the leftmost panel needs them.
+        if ix > 0:
+            ax.tick_params(labelleft=False)
         ax.set_xlabel("Selectivity")
-        ax.set_xticks(SELECTIVITY_ARRAY[::2], labels=map(str, SELECTIVITY_ARRAY[::2]))
+        # Interior tick positions: an edge tick's label is centred on the panel
+        # boundary, so the last label of one panel and the first of the next
+        # overlap at this width (1.6384 ran into 0.0064).
+        ax.set_xticks(SELECTIVITY_ARRAY[1:-1:2], labels=map(str, SELECTIVITY_ARRAY[1:-1:2]))
 
     legend_ax.axis("off")
     legend_ax.legend(
@@ -878,7 +1056,11 @@ def plot_gran_best_block_vs_average(
     best_vs_average_df = best_vs_average_df.copy()
     best_vs_average_df["query_latency"] = best_vs_average_df["query_latency"] / 1_000_000
 
-    fig, ax1 = plt.subplots(figsize=(COLUMN_FIT, 1))
+    # 1.0in tall could not hold a 12-model legend, the bars and two axis labels at
+    # once: the legend sat inside the axes at upper-left, on top of the bars and
+    # their standard-deviation whiskers, and bbox_inches="tight" then grew the
+    # saved page to fit the spill rather than clipping it.
+    fig, ax1 = plt.subplots(figsize=(COLUMN_FIT, 1.9))
     sb.barplot(
         ax=ax1,
         data=best_vs_average_df,
@@ -894,18 +1076,26 @@ def plot_gran_best_block_vs_average(
     ax1.set_yscale("log")
     ax1.set_xlabel("")
     ax1.set_ylabel("Query Latency (ms)")
-    ax1.set_ylim(bottom=0.055)
+    # Measured from the frame main() actually passes -- build_best_vs_average_df(df,
+    # optimal_measurable_memory), where the "Block-averaged" half comes from the FULL
+    # df across every block size, not from the optimal-only frame. Bars reach 0.091
+    # and the +-1sd whiskers span [0.0067, 0.137], so both bounds need real room.
+    ax1.set_ylim(bottom=0.0055, top=0.16)
     ax1.yaxis.set_minor_locator(NullLocator())
+    # Above the axes rather than inside them, so it can never overlap a bar or a
+    # whisker; 6 columns puts the 12 models on two rows.
     ax1.legend(
         handles,
         [model_labels[model] for model in labels],
-        ncols=4,
-        loc="upper left",
+        ncols=6,
+        loc="lower left",
+        bbox_to_anchor=(0.0, 1.01),
         columnspacing=0.5,
         handletextpad=0.1,
         labelspacing=0.2,
-        borderaxespad=0.3,
-        fontsize=7,
+        borderaxespad=0.0,
+        frameon=False,
+        fontsize=6,
     )
 
     save_figure(fig, figures_dir / "GRAN_BestBlockVsAvg_barplot.pdf")
@@ -972,8 +1162,8 @@ def plot_analysis_refinement_scan(
     fig = plt.figure(figsize=(PAGE_FIT, 2.4))
 
     ax1 = plt.subplot(2, 4, 1)
-    ax1.set_ylim(bottom=0.00085, top=0.06)
-    ax1.set_xlim(left=0.006, right=1.5)
+    ax1.set_ylim(bottom=0.00035, top=0.042)
+    ax1.set_xlim(left=0.0035, right=0.6)
     ax2 = plt.subplot(2, 4, 2, sharey=ax1, sharex=ax1)
     ax3 = plt.subplot(2, 4, 3, sharey=ax1, sharex=ax1)
     ax4 = plt.subplot(2, 4, 4, sharey=ax1, sharex=ax1)
@@ -1088,7 +1278,7 @@ def plot_access_patterns(
 
     axs1[0][0].set_xscale("log")
     axs1[0][0].set_yscale("log")
-    axs1[0][0].set_xlim(right=0.95, left=0.005)
+    axs1[0][0].set_xlim(right=1.0, left=0.0018)
     
 
     percent_label = r"\%" if use_tex else "%"
@@ -1099,7 +1289,9 @@ def plot_access_patterns(
 
     axs2[0][0].set_xscale("log")
     axs2[0][0].set_yscale("log")
-    axs2[0][0].set_ylim(top=0.007, bottom=0.000005)
+    # refinement_latency_per_block measures [1.4e-06, 6.2e-04] ms; the old top of
+    # 0.007 left better than an order of magnitude of empty panel above the data.
+    axs2[0][0].set_ylim(top=0.0008, bottom=0.0000012)
 
     fig2.supxlabel(f"{percent_label} Blocks Accessed Per Query", fontsize=7.25)
     fig2.supylabel("Refinement Latency Per Block (ms)", fontsize=7.25)
@@ -1141,9 +1333,20 @@ def plot_gran_block_size_selectivity_disk_backed(
     axs = [ax1, ax2, ax3, ax4]
     axs2 = [ax21, ax22, ax23, ax24]
 
+    pool_blocks = disk_backed_block_sizes(df)
+
+    # Every panel shares ax1's y axis, so the limits must span all four.
+    pool_latencies = (
+        df[(df["selectivity"] == DEFAULT_SELECTIVITY)
+           & (df["block_size"].isin(pool_blocks))]
+        .groupby(["type", "block_size", "model"])["disk_backed_query_latency"]
+        .mean() / 1_000_000
+    )
+
     for ix, index_type in enumerate(TYPE_ORDER):
         temp_df = df[df["type"] == index_type].copy()
         temp_df = temp_df[temp_df["selectivity"] == DEFAULT_SELECTIVITY]
+        temp_df = temp_df[temp_df["block_size"].isin(pool_blocks)]
         temp_df = temp_df.groupby(["block_size", "model"]).mean(numeric_only=True).reset_index()
         temp_df["disk_backed_query_latency"] = (
             temp_df["disk_backed_query_latency"] / 1_000_000
@@ -1168,15 +1371,38 @@ def plot_gran_block_size_selectivity_disk_backed(
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
         ax.set_ylabel("Query Latency (ms)" if ix == 0 else None, fontsize=7)
+        # sharey=True makes panels 2-4 carry the same scale, but matplotlib still
+        # draws their tick labels; at this panel width those labels run into the
+        # neighbouring panel's frame. Only the leftmost panel needs them.
+        if ix > 0:
+            ax.tick_params(labelleft=False)
         ax.set_xlabel("Avg. Block Size", fontsize=7)
-        ax.set_xticks(BLOCK_SIZE_ARRAY[::2], labels=map(str, BLOCK_SIZE_ARRAY[::2]))
-        ax.set_yticks([1, 10, 100], labels=map(str, [1, 10, 100]))
+        # Interior tick positions: an edge tick's label is centred on the panel
+        # boundary, so the last label of one panel and the first of the next
+        # overlap at this width (1.6384 ran into 0.0064).
+        ax.set_xticks(pool_blocks[1:-1:2], labels=map(str, pool_blocks[1:-1:2]))
         ax.set_title(TYPE_TITLES[ix], fontsize=7)
 
         handles, labels = ax.get_legend_handles_labels()
         ax.legend().set_visible(False)
         labels_arr += labels
         handles_arr += handles
+
+    # Applied after the loop, not inside it. These panels share ax1's y axis, and
+    # every iteration calls set_yscale("log") -- which resets the shared axis's
+    # locator and formatter, discarding ticks an earlier iteration had set.
+    #
+    # Derived rather than fixed because the values plotted here are buffer-pool
+    # latencies: they move with --disk-fraction (roughly [1.5, 4.2] ms at 0.25 and
+    # [3.5, 11.2] at 0.01), so any hardcoded range clips one budget or the other.
+    pool_limits = log_limits(pool_latencies)
+    if pool_limits is not None:
+        ax1.set_ylim(bottom=pool_limits[0], top=pool_limits[1])
+        pool_ticks = log_ticks(*pool_limits)
+        ax1.set_yticks(pool_ticks, labels=[f"{tick:g}" for tick in pool_ticks])
+        # A sub-decade log range makes matplotlib label the minor ticks too, which
+        # reappear inside the neighbouring panels.
+        ax1.set_yticks([], minor=True)
 
     for ix, index_type in enumerate(TYPE_ORDER):
         temp_df = optimal_setting_disk[optimal_setting_disk["type"] == index_type].copy()
@@ -1202,8 +1428,16 @@ def plot_gran_block_size_selectivity_disk_backed(
         ax.set_xscale("log", base=2)
         ax.set_yscale("log", base=2)
         ax.set_ylabel("Optimal block sizes" if ix == 0 else None, fontsize=7)
+        # sharey=True makes panels 2-4 carry the same scale, but matplotlib still
+        # draws their tick labels; at this panel width those labels run into the
+        # neighbouring panel's frame. Only the leftmost panel needs them.
+        if ix > 0:
+            ax.tick_params(labelleft=False)
         ax.set_xlabel("Selectivity", fontsize=7)
-        ax.set_xticks(SELECTIVITY_ARRAY[::2], labels=map(str, SELECTIVITY_ARRAY[::2]))
+        # Interior tick positions: an edge tick's label is centred on the panel
+        # boundary, so the last label of one panel and the first of the next
+        # overlap at this width (1.6384 ran into 0.0064).
+        ax.set_xticks(SELECTIVITY_ARRAY[1:-1:2], labels=map(str, SELECTIVITY_ARRAY[1:-1:2]))
 
     legend_ax.axis("off")
     legend_ax.legend(
@@ -2371,8 +2605,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=repo_root / "Results" / "20260604-8M",
+        required=True,
         help="Directory containing Results.json and Results.pkl.",
+    )
+    parser.add_argument(
+        "--experiment-config",
+        type=Path,
+        default=repo_root / "experiment_config.json",
+        help=("Experiment configuration to read n_points, n_queries and the "
+              "target fractions from. These used to be hardcoded here."),
+    )
+    parser.add_argument(
+        "--experiment-name",
+        default=None,
+        help="Experiment inside the config file. Defaults to its default_experiment.",
     )
     parser.add_argument(
         "--figures-dir",
@@ -2405,6 +2651,12 @@ def main() -> None:
     args = parse_args()
     if args.figures_dir is None:
         args.figures_dir = args.data_dir / "figures"
+
+    n_points, n_queries, default_selectivity = load_experiment_geometry(
+        args.experiment_config, args.experiment_name)
+    configure_experiment(n_points, n_queries, default_selectivity)
+    print(f"experiment geometry: n_points={n_points:,} n_queries={n_queries:,} "
+          f"default selectivity={default_selectivity:g}")
 
     use_tex = not args.no_tex
     model_labels = LATEX_MODEL_LABELS if use_tex else PLAIN_MODEL_LABELS
