@@ -6,7 +6,7 @@ import math
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Sequence, Union
 
 import numpy as np
 
@@ -122,6 +122,16 @@ class GeneratorConfig:
     bbox_max_height_deg: float = 30.0
     real_num_samples: int = 5
     real_max_bbox_tries: int = 100
+    # Number of disjoint real regions blended into ONE dataset. k=1 reproduces
+    # the single-bbox behaviour exactly. k>1 draws k regions, normalizes each to
+    # the unit square independently, and overlays them -- see
+    # sample_real_mixture_from_bboxes for why that particular combination rule.
+    real_mixture_k: int = 1
+    # How many samples' regions share one pass over the parquet. The scan cannot
+    # be narrowed -- the file is in OSM node-id order, so every row group spans
+    # most of the globe and the statistics prune nothing -- so the only way to
+    # cut I/O is to answer more regions per pass. See sample_real_mixture_batch.
+    real_scan_batch_samples: int = 10
 
     # Real-world KNN centroid generation
     real_knn_k: int = 512
@@ -135,6 +145,62 @@ class GeneratorConfig:
     query_plot_max_rectangles: int = 200
     query_rect_linewidth: float = 0.8
     query_rect_alpha: float = 0.35
+
+
+class _RegionReservoir:
+    """Uniform sample of `quota` points drawn from a stream of unknown length.
+
+    Keeps the `quota` points with the largest independent uniform keys, which is
+    a uniform sample without replacement. Points arrive in parquet batches, so
+    rather than re-selecting on every batch (an argpartition over the whole
+    reservoir 2000+ times per scan) it buffers arrivals and prunes back to quota
+    only once the buffer has doubled. Pruning is O(buffered), and it runs O(n /
+    quota) times, so the total selection cost stays linear in the points seen.
+    """
+
+    def __init__(self, quota: int, rng: np.random.Generator):
+        self.quota = max(int(quota), 0)
+        self.rng = rng
+        self.seen = 0
+        self._points: list[np.ndarray] = []
+        self._keys: list[np.ndarray] = []
+        self._buffered = 0
+
+    def add(self, points: np.ndarray) -> None:
+        count = len(points)
+        if count == 0:
+            return
+        self.seen += count
+        if self.quota == 0:
+            return
+        self._points.append(points)
+        self._keys.append(self.rng.random(count))
+        self._buffered += count
+        if self._buffered > 2 * self.quota:
+            self._compact()
+
+    def _compact(self) -> None:
+        if not self._points:
+            return
+        points = (
+            self._points[0]
+            if len(self._points) == 1
+            else np.concatenate(self._points)
+        )
+        keys = self._keys[0] if len(self._keys) == 1 else np.concatenate(self._keys)
+        if len(keys) > self.quota:
+            keep = np.argpartition(keys, len(keys) - self.quota)[-self.quota :]
+            points = points[keep]
+            keys = keys[keep]
+        self._points = [points]
+        self._keys = [keys]
+        self._buffered = len(keys)
+
+    def result(self) -> np.ndarray:
+        self._compact()
+        if not self._points:
+            return np.empty((0, 2), dtype=np.float32)
+        return self._points[0]
 
 
 class SpatialWorkloadGenerator:
@@ -722,6 +788,87 @@ class SpatialWorkloadGenerator:
         lon_all = np.concatenate(lon_chunks)
         return np.column_stack((lat_all, lon_all)).astype(np.float32, copy=False)
 
+    def reservoir_sample_multi_bbox(
+        self,
+        parquet_path: str,
+        boxes: Sequence[tuple[float, float, float, float]],
+        quotas: Sequence[int],
+        batch_rows: Optional[int] = None,
+    ) -> list[tuple[np.ndarray, int]]:
+        """Uniformly sample `quota` points from each box in ONE pass.
+
+        Returns (sample, total_seen) per box, where total_seen is the true
+        population of the box -- the caller still needs it to reject a region
+        that could not fill its quota, and to record actual_count_before_trim.
+
+        Two things made the old materialize-then-trim approach expensive. It held
+        every point of every region (up to 64M each) only to discard ~97% of
+        them, and because it could only afford a few boxes at a time it needed a
+        separate full scan per sample. Sampling as the stream goes by caps each
+        region at its quota, which is what makes it affordable to put many
+        samples' regions in the same pass.
+
+        The sampling is the exponential-key formulation of reservoir sampling
+        (A-Res with uniform weights): give every point an independent uniform
+        key and keep the `quota` largest. That yields exactly a uniform sample
+        without replacement -- the same distribution the old code obtained by
+        shuffling the full region and slicing the front of it.
+        """
+        if pq is None:
+            raise ImportError("pyarrow is required for parquet support.")
+        batch_rows = batch_rows or self.cfg.parquet_batch_rows
+
+        bounds = []
+        for min_lat, min_lon, max_lat, max_lon in boxes:
+            if min_lat > max_lat:
+                min_lat, max_lat = max_lat, min_lat
+            if min_lon > max_lon:
+                min_lon, max_lon = max_lon, min_lon
+            bounds.append((min_lat, min_lon, max_lat, max_lon))
+
+        reservoirs = [_RegionReservoir(int(q), self.rng) for q in quotas]
+
+        parquet_file = pq.ParquetFile(parquet_path)
+        for batch in parquet_file.iter_batches(
+            batch_size=batch_rows,
+            columns=["lat", "lon"],
+        ):
+            lat = batch.column(0).to_numpy(zero_copy_only=False)
+            lon = batch.column(1).to_numpy(zero_copy_only=False)
+            for index, (min_lat, min_lon, max_lat, max_lon) in enumerate(bounds):
+                mask = (
+                    (lat >= min_lat)
+                    & (lat <= max_lat)
+                    & (lon >= min_lon)
+                    & (lon <= max_lon)
+                )
+                if np.any(mask):
+                    reservoirs[index].add(
+                        np.column_stack((lat[mask], lon[mask])).astype(
+                            np.float32, copy=False
+                        )
+                    )
+
+        return [(r.result(), r.seen) for r in reservoirs]
+
+    def draw_grid_approved_bbox(
+        self,
+        world_grid: np.ndarray,
+        approx_low: int,
+        approx_high: int,
+        max_tries: int,
+    ) -> tuple[tuple[float, float, float, float], int, int]:
+        """Draw until the world grid says the box is in range. No parquet I/O."""
+        for draws in range(1, max_tries + 1):
+            bbox = self.make_random_world_bbox()
+            approx = self.approx_count_bbox(world_grid, *bbox)
+            if approx_low <= approx <= approx_high:
+                return bbox, int(approx), draws
+        raise RuntimeError(
+            f"No bbox with approx count in [{approx_low}, {approx_high}] after "
+            f"{max_tries} draws. Raise real_max_bbox_tries or widen the window."
+        )
+
     def normalize_points_to_unit_square(
         self,
         points: np.ndarray,
@@ -774,6 +921,165 @@ class SpatialWorkloadGenerator:
             }
 
         raise RuntimeError("Could not find a suitable real-world bbox sample.")
+
+    def sample_real_mixture_batch(
+        self,
+        parquet_path: str,
+        world_grid: np.ndarray,
+        n_samples: int,
+        mixture_k: Optional[int] = None,
+        target_count: Optional[int] = None,
+        approx_low: Optional[int] = None,
+        approx_high: Optional[int] = None,
+        max_tries: Optional[int] = None,
+    ) -> list[tuple[np.ndarray, dict]]:
+        """Build `n_samples` mixture datasets from ONE pass over the parquet.
+
+        Each dataset blends k disjoint real regions: every region is normalized
+        to the unit square on its own extent and the results are overlaid, so
+        the regions span the same square and their voids fill each other in.
+        Tiling into quadrants was measured and rejected (hard rectangular seams,
+        less entropy gain), as was keeping true world coordinates and
+        normalizing the union (worse than a single region -- boxes scattered
+        over the globe give a union extent spanning most of the planet, which
+        collapses each region into a tiny dense blob).
+
+        Note what this produces. Overlaying k independent densities IS a mixture
+        model, structurally the same construction as the synthetic GMM, and it
+        destroys the coherent geography -- coastlines, road networks -- that
+        makes single-region data hard to index. The result is semi-synthetic and
+        should be reported as such; k=1 is the honest real dataset, and k is a
+        skew knob applied on top of realistic local texture.
+
+        Batching exists because the scan cannot be narrowed. The parquet is in
+        OSM node-id order, so every row group's lat/lon statistics span most of
+        the globe and predicate pushdown prunes nothing -- each pass genuinely
+        reads all 1.08B rows. Answering one sample per pass therefore meant ~100
+        full reads of a 7.5 GB file, and it was the resulting page-cache churn,
+        not the Python heap, that got job 942613 OOM-killed. Reservoir sampling
+        caps each region at its quota, which is what makes it affordable to put
+        many samples' regions in the same pass.
+        """
+        mixture_k = mixture_k or self.cfg.real_mixture_k
+        target_count = target_count or self.cfg.real_target_points
+        approx_low = approx_low or self.cfg.approx_count_low
+        approx_high = approx_high or self.cfg.approx_count_high
+        max_tries = max_tries or self.cfg.real_max_bbox_tries
+
+        if mixture_k < 1:
+            raise ValueError(f"real_mixture_k must be >= 1, got {mixture_k}")
+
+        # Split each sample's budget as evenly as possible; the leading regions
+        # absorb the remainder so the parts always sum to exactly target_count.
+        base, extra = divmod(target_count, mixture_k)
+        quotas = [base + (1 if i < extra else 0) for i in range(mixture_k)]
+
+        # One slot per region of every sample in this batch. draws is carried so
+        # the per-sample metadata can still report how many bboxes were tried.
+        slots: list[dict] = []
+        for sample_index in range(n_samples):
+            for region_index in range(mixture_k):
+                bbox, approx, draws = self.draw_grid_approved_bbox(
+                    world_grid, approx_low, approx_high, max_tries
+                )
+                slots.append(
+                    {
+                        "sample_index": sample_index,
+                        "region_index": region_index,
+                        "quota": quotas[region_index],
+                        "bbox": bbox,
+                        "approx": approx,
+                        "draws": draws,
+                        "points": None,
+                        "seen": 0,
+                    }
+                )
+
+        # Resolve every slot, re-drawing any region whose true population could
+        # not fill its quota. With approx_low well above the per-region quota
+        # this effectively never fires, but a rescan is the only honest fix and
+        # it costs one extra pass rather than a wrong-sized dataset.
+        pending = slots
+        rescans = 0
+        while pending:
+            resolved = self.reservoir_sample_multi_bbox(
+                parquet_path,
+                [slot["bbox"] for slot in pending],
+                [slot["quota"] for slot in pending],
+            )
+            still_short: list[dict] = []
+            for slot, (sample_points, seen) in zip(pending, resolved):
+                if seen < slot["quota"]:
+                    bbox, approx, draws = self.draw_grid_approved_bbox(
+                        world_grid, approx_low, approx_high, max_tries
+                    )
+                    slot["bbox"] = bbox
+                    slot["approx"] = approx
+                    slot["draws"] += draws
+                    still_short.append(slot)
+                    continue
+                slot["points"] = sample_points
+                slot["seen"] = seen
+            pending = still_short
+            if pending:
+                rescans += 1
+                if rescans > mixture_k:
+                    raise RuntimeError(
+                        f"{len(pending)} region(s) still short of quota after "
+                        f"{rescans} rescans; widen [approx_low, approx_high]."
+                    )
+
+        results: list[tuple[np.ndarray, dict]] = []
+        for sample_index in range(n_samples):
+            regions = [s for s in slots if s["sample_index"] == sample_index]
+            regions.sort(key=lambda slot: slot["region_index"])
+
+            parts: list[np.ndarray] = []
+            region_meta: list[dict] = []
+            for slot in regions:
+                # The reservoir already returned a uniform subset, so unlike the
+                # materialize-then-trim version there is nothing to shuffle here.
+                normalized, norm_meta = self.normalize_points_to_unit_square(
+                    slot["points"]
+                )
+                parts.append(normalized)
+                region_meta.append(
+                    {
+                        "bbox": list(map(float, slot["bbox"])),
+                        "approx_count": int(slot["approx"]),
+                        "actual_count_before_trim": int(slot["seen"]),
+                        "points_contributed": int(slot["quota"]),
+                        **norm_meta,
+                    }
+                )
+
+            points = np.concatenate(parts, axis=0)
+            # Interleave the regions. Left concatenated the file is k contiguous
+            # blocks, and any index sensitive to insertion order would see
+            # structure that the point SET does not have.
+            self.rng.shuffle(points, axis=0)
+
+            results.append(
+                (
+                    self.ensure_unit_square(points),
+                    {
+                        "mixture_k": int(mixture_k),
+                        "target_count": int(target_count),
+                        "attempt": int(sum(slot["draws"] for slot in regions)),
+                        "regions": region_meta,
+                        # Flat keys kept for readers of the k=1 metadata layout.
+                        "bbox": region_meta[0]["bbox"],
+                        "approx_count": region_meta[0]["approx_count"],
+                        "actual_count_before_trim": region_meta[0][
+                            "actual_count_before_trim"
+                        ],
+                        "mins": region_meta[0]["mins"],
+                        "maxs": region_meta[0]["maxs"],
+                    },
+                )
+            )
+
+        return results
 
     # ------------------------------------------------------------------
     # Real-world KNN centroid generation
@@ -1328,76 +1634,120 @@ class SpatialWorkloadGenerator:
             self.rng.random((self.cfg.real_target_points, 2))
         )
 
-        for data_sample_num in range(1, self.cfg.real_num_samples + 1):
-            dataset_dir = self.output_root / str(data_sample_num)
-            datapoint_root = dataset_dir / "datapoints"
-            query_root = dataset_dir / "queries"
-            (datapoint_root / "plots").mkdir(parents=True, exist_ok=True)
-            query_root.mkdir(parents=True, exist_ok=True)
-
-            points, metadata = self.sample_real_dataset_from_bbox(
-                parquet_path=parquet_path,
-                world_grid=world_grid,
-                target_count=self.cfg.real_target_points,
-                approx_low=self.cfg.approx_count_low,
-                approx_high=self.cfg.approx_count_high,
-                max_tries=self.cfg.real_max_bbox_tries,
-            )
-
-            data_entropy = self.entropy(points)
-            normalized_entropy = 0.0
-            if uniform_entropy > 0.0:
-                normalized_entropy = float(data_entropy / uniform_entropy)
-
-            self.save_points(datapoint_root / "1", points, fmt="%.8f")
-            self.save_plot(
-                datapoint_root / "plots" / "1.png",
-                points,
-                title=f"real sample={data_sample_num}",
-            )
-            metadata["entropy"] = data_entropy
-            self.save_json(datapoint_root / "meta.json", metadata)
-
-            if self.cfg.single_query_workload_per_sample:
-                (
-                    selected_query_entropy_id,
-                    selected_target_fraction,
-                    selected_selectivity_id,
-                ) = self.select_real_validation_workload()
-                query_payload = self.generate_other_queries(
-                    points,
-                    mode="real",
-                    query_entropy_ids=[selected_query_entropy_id],
-                    target_fractions=[selected_target_fraction],
+        if self.cfg.real_mixture_k > 1:
+            # Mixture mode scans once per BATCH of samples rather than once per
+            # sample. See sample_real_mixture_batch for why the pass count, not
+            # the heap, is the quantity that has to come down.
+            batch_size = max(int(self.cfg.real_scan_batch_samples), 1)
+            total = self.cfg.real_num_samples
+            for batch_start in range(0, total, batch_size):
+                batch_ids = list(
+                    range(batch_start + 1, min(batch_start + batch_size, total) + 1)
                 )
-            else:
-                selected_selectivity_id = None
-                query_payload = self.generate_other_queries(points, mode="real")
-            query_entropy_rows = self.write_other_queries(
+                self.log(
+                    f"scanning parquet for samples {batch_ids[0]}-{batch_ids[-1]} "
+                    f"({len(batch_ids)} samples x {self.cfg.real_mixture_k} regions)"
+                )
+                batch = self.sample_real_mixture_batch(
+                    parquet_path=parquet_path,
+                    world_grid=world_grid,
+                    n_samples=len(batch_ids),
+                    mixture_k=self.cfg.real_mixture_k,
+                    target_count=self.cfg.real_target_points,
+                    approx_low=self.cfg.approx_count_low,
+                    approx_high=self.cfg.approx_count_high,
+                    max_tries=self.cfg.real_max_bbox_tries,
+                )
+                for data_sample_num, (points, metadata) in zip(batch_ids, batch):
+                    self.write_real_sample(
+                        data_sample_num, points, metadata, uniform_entropy
+                    )
+                    # The batch holds every sample's points until the loop ends;
+                    # drop each one as it is written so peak memory tracks the
+                    # batch's tail rather than its whole.
+                    del points
+        else:
+            for data_sample_num in range(1, self.cfg.real_num_samples + 1):
+                points, metadata = self.sample_real_dataset_from_bbox(
+                    parquet_path=parquet_path,
+                    world_grid=world_grid,
+                    target_count=self.cfg.real_target_points,
+                    approx_low=self.cfg.approx_count_low,
+                    approx_high=self.cfg.approx_count_high,
+                    max_tries=self.cfg.real_max_bbox_tries,
+                )
+                self.write_real_sample(
+                    data_sample_num, points, metadata, uniform_entropy
+                )
+
+    def write_real_sample(
+        self,
+        data_sample_num: int,
+        points: np.ndarray,
+        metadata: dict,
+        uniform_entropy: float,
+    ) -> None:
+        """Write one real sample: datapoints, plot, queries, entropy tables."""
+        dataset_dir = self.output_root / str(data_sample_num)
+        datapoint_root = dataset_dir / "datapoints"
+        query_root = dataset_dir / "queries"
+        (datapoint_root / "plots").mkdir(parents=True, exist_ok=True)
+        query_root.mkdir(parents=True, exist_ok=True)
+
+        data_entropy = self.entropy(points)
+        normalized_entropy = 0.0
+        if uniform_entropy > 0.0:
+            normalized_entropy = float(data_entropy / uniform_entropy)
+
+        self.save_points(datapoint_root / "1", points, fmt="%.8f")
+        self.save_plot(
+            datapoint_root / "plots" / "1.png",
+            points,
+            title=f"real sample={data_sample_num}",
+        )
+        metadata["entropy"] = data_entropy
+        self.save_json(datapoint_root / "meta.json", metadata)
+
+        if self.cfg.single_query_workload_per_sample:
+            (
+                selected_query_entropy_id,
+                selected_target_fraction,
+                selected_selectivity_id,
+            ) = self.select_real_validation_workload()
+            query_payload = self.generate_other_queries(
+                points,
+                mode="real",
+                query_entropy_ids=[selected_query_entropy_id],
+                target_fractions=[selected_target_fraction],
+            )
+        else:
+            selected_selectivity_id = None
+            query_payload = self.generate_other_queries(points, mode="real")
+        query_entropy_rows = self.write_other_queries(
+            dataset_dir,
+            1,
+            query_payload,
+            points,
+        )
+        if self.cfg.single_query_workload_per_sample:
+            self.write_selected_workload_metadata(
                 dataset_dir,
-                1,
-                query_payload,
-                points,
+                data_entropy_id=1,
+                payload=query_payload,
+                selectivity_id=int(selected_selectivity_id),
             )
-            if self.cfg.single_query_workload_per_sample:
-                self.write_selected_workload_metadata(
-                    dataset_dir,
-                    data_entropy_id=1,
-                    payload=query_payload,
-                    selectivity_id=int(selected_selectivity_id),
-                )
 
-            self.write_entropy_table(
-                datapoint_root / "entropy_values",
-                np.asarray([[1.0, normalized_entropy]], dtype=np.float64),
-                fmt=["%d", "%.9f"],
-            )
-            self.write_entropy_table(
-                query_root / "entropy_values",
-                np.asarray(query_entropy_rows, dtype=np.float64),
-                fmt=["%d", "%d", "%.9f"],
-            )
-            self.save_json(dataset_dir / "config.json", asdict(self.cfg))
+        self.write_entropy_table(
+            datapoint_root / "entropy_values",
+            np.asarray([[1.0, normalized_entropy]], dtype=np.float64),
+            fmt=["%d", "%.9f"],
+        )
+        self.write_entropy_table(
+            query_root / "entropy_values",
+            np.asarray(query_entropy_rows, dtype=np.float64),
+            fmt=["%d", "%d", "%.9f"],
+        )
+        self.save_json(dataset_dir / "config.json", asdict(self.cfg))
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1587,6 +1937,26 @@ def main() -> None:
                 experiment_config,
                 "single_query_workload_per_sample",
                 default_cfg.single_query_workload_per_sample,
+            ),
+            # Both of these were dataclass-only before, so a config file could
+            # not reach them. real_max_bbox_tries at its hardcoded 100 is what
+            # aborted the 100-sample run: acceptance is ~3.5% per draw, so a
+            # single sample exhausts 100 tries 2.8% of the time and at least one
+            # of 100 samples does so with probability ~0.94.
+            real_max_bbox_tries=config_value(
+                experiment_config,
+                "real_max_bbox_tries",
+                default_cfg.real_max_bbox_tries,
+            ),
+            real_mixture_k=config_value(
+                experiment_config,
+                "real_mixture_k",
+                default_cfg.real_mixture_k,
+            ),
+            real_scan_batch_samples=config_value(
+                experiment_config,
+                "real_scan_batch_samples",
+                default_cfg.real_scan_batch_samples,
             ),
             center_grid_size=config_value(
                 experiment_config,

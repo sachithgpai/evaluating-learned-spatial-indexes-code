@@ -23,7 +23,7 @@
     "real": {
       "seed": 42,
       "n_queries": 1000,
-      "num_samples": 10,
+      "num_samples": 100,
       "num_query_scales": 5,
       "num_query_clusters": 5,
       "target_fractions": [
@@ -36,13 +36,16 @@
       "density_grid_size": 512,
       "real_target_points": 8000000,
       "approx_low": 12000000,
-      "approx_high": 16000000,
+      "approx_high": 64000000,
       "real_knn_k": 512,
       "real_center_candidates": 2000,
       "center_grid_size": 256,
       "exact_refine_steps": 0,
       "data_entropy_variants": 1,
-      "single_query_workload_per_sample": true
+      "single_query_workload_per_sample": true,
+      "real_max_bbox_tries": 500,
+      "real_mixture_k": 4,
+      "real_scan_batch_samples": 10
     }
   },
   "evaluation": {
