@@ -23,6 +23,14 @@ DATASET_FOLDER_NAME = ''
 RTreeStructure = []
 RTreeStructure_LR = []
 
+# Per-node diagnostic dumps -- target/learned scatter plots and class bincounts,
+# written next to the trained index. Off unless RSMI_DEBUG_FILES=1: they cost two
+# figures per learned node, which over a full build is thousands of files and a
+# large share of the wall clock. These blocks used to be `if False:`, which meant
+# they silently rotted -- turning them on also needs index_save_folder to exist,
+# and the mkdir for it was commented out separately further down.
+RSMI_DEBUG_FILES = os.environ.get('RSMI_DEBUG_FILES','') == '1'
+
 #%%
 
 class RSMINode(torch.nn.Module):
@@ -105,8 +113,8 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
     sampled_datapoints =  PrepareDataForTraining(sampled_datapoints,num_splits_per_dim)
 
 
-    # np.savetxt(index_save_folder/(node_name_str+'_TARGET_bincounts.txt'),np.bincount(sampled_datapoints[:,2].astype(int),minlength=num_boxes),fmt='%d') #DEBUGFILES
-    if False:  #DEBUGFILES
+    if RSMI_DEBUG_FILES:
+        np.savetxt(index_save_folder/(node_name_str+'_TARGET_bincounts.txt'),np.bincount(sampled_datapoints[:,2].astype(int),minlength=num_boxes),fmt='%d')
         fig,ax = plt.subplots(figsize=(10,10))
         ax.scatter(sampled_datapoints[:,0],sampled_datapoints[:,1],c=sampled_datapoints[:,2],s=1410/np.sqrt(sampled_datapoints.shape[0]))
         fig.savefig(index_save_folder/(node_name_str+'_RSMI_points_Target.png'))
@@ -153,7 +161,7 @@ def TrainRSMINode(datapoints,index_save_folder,page_size,tree_write_file,node_na
     # traced = torch.jit.trace(net, inp) #MAKEITRTREE
     # traced.save(index_save_folder/(node_name_str+'.pt'))
 
-    if False:
+    if RSMI_DEBUG_FILES:
         fig,ax = plt.subplots(figsize=(10,10))
         box_sampled = torch.argmax(net(inp), dim=1).int().reshape(-1)
         ax.scatter(sampled_datapoints[:,0],sampled_datapoints[:,1],c=box_sampled.detach().numpy(),s=1410/np.sqrt(sampled_datapoints.shape[0]))
@@ -262,7 +270,8 @@ if __name__ == '__main__':
 
     index_save_folder_name = f"P_{page_size}_D_{data_sample_num}_DE_{data_ent_id}"
     index_save_folder = PROJECT_ROOT/'Experiments'/DATASET_FOLDER_NAME/'TrainedIndexes'/'RSMI'/index_save_folder_name
-    # index_save_folder.mkdir(parents=True,exist_ok=True) # DEBUGFILES
+    if RSMI_DEBUG_FILES:
+        index_save_folder.mkdir(parents=True,exist_ok=True)
 
 
     datapoints = np.loadtxt(PROJECT_ROOT/'Datasets'/DATASET_FOLDER_NAME/str(data_sample_num)/'datapoints'/str(data_ent_id),delimiter=' ')

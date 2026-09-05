@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <numeric>
 #include <filesystem>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -97,6 +98,65 @@ inline bool KeepBlockstoreFiles(){
 inline bool DirectIoEnabled(){
     const char* flag = std::getenv("BUFFER_POOL_DIRECT_IO");
     return flag != nullptr && std::string(flag) == "1";
+}
+
+
+/**
+ * Escape hatch for running the paged backend where the page cache cannot be
+ * dropped.
+ *
+ * Page hits and misses are counted in software and so are unaffected by what
+ * the kernel happens to be caching; only wall-clock timings are. That makes
+ * this the right switch for the unit tests and for any functional run on a
+ * laptop, and the wrong one for a run whose numbers go in a table.
+ */
+inline bool WarmPageCacheAllowed(){
+    const char* flag = std::getenv("ALLOW_WARM_PAGE_CACHE");
+    return flag != nullptr && std::string(flag) == "1";
+}
+
+
+/**
+ * React to a page cache we could not drop.
+ *
+ * The asymmetry is deliberate. Under O_DIRECT the leftover copy costs RAM and
+ * nothing else, because direct reads bypass the cache whether or not it holds
+ * the store -- a warning is the honest response. Under buffered reads the same
+ * leftover silently invalidates every latency the run reports: the entire store
+ * is resident before the first query, so a pool "miss" is a memcpy out of
+ * kernel memory rather than the device read it is supposed to stand for. That
+ * is worse than a crash, because the numbers come out plausible. So the
+ * buffered case stops unless it was asked for explicitly.
+ */
+inline void ReportUndroppedPageCache(PageCacheDropStatus status, bool direct_io){
+    const std::string detail =
+        std::string("PagedDiskBackend: could not drop the writer's pages from the OS page cache (")+
+        PageCacheDropReason(status)+")";
+
+    if(direct_io){
+        static bool warned = false;
+        if(!warned){
+            warned = true;
+            std::cerr<<detail<<". Reads are O_DIRECT, so measured latency is unaffected; the "
+                       "resident copy is memory this run's budget does not account for."<<std::endl;
+        }
+        return;
+    }
+
+    if(!WarmPageCacheAllowed())
+        throw std::runtime_error(
+            detail+". Reads go through that cache, so the whole store is resident before the "
+            "first query and every pool miss would be a memcpy rather than a device read -- a "
+            "latency measured here would be wrong, not merely noisy. Set BUFFER_POOL_DIRECT_IO=1 "
+            "to bypass the cache, run on a platform where it can be purged, or set "
+            "ALLOW_WARM_PAGE_CACHE=1 if this run only checks correctness.");
+
+    static bool warned = false;
+    if(!warned){
+        warned = true;
+        std::cerr<<detail<<", and ALLOW_WARM_PAGE_CACHE=1 is set: page hit/miss counts stay "
+                   "valid, but do not report timings from this run."<<std::endl;
+    }
 }
 
 /** Read a size_t from the environment, falling back to `fallback` when unset or unparsable. */
@@ -262,10 +322,13 @@ class PagedDiskBackend: public PointStorageBackend{
             //7. Drop the pages the writer just left behind in the OS cache.
             //
             // They are a second copy of the whole store sitting in kernel memory.
-            // Harmless to correctness -- direct reads ignore them either way --
-            // but they occupy RAM that the memory-budget claim says we are not
-            // using. Advisory by definition, so a refusal here is not an error.
-            posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+            // Always harmless to correctness -- hits and misses are counted in
+            // software -- but what an undropped cache costs depends on the read
+            // path, so the reporting is split by it. Advisory by definition, so a
+            // refusal is a fact to report, not a bug to assert away.
+            const PageCacheDropStatus drop = DropFileFromPageCache(fd_);
+            if(drop != PageCacheDropStatus::kDropped)
+                ReportUndroppedPageCache(drop, direct_io_);
 
             //8. Unlink the file immediately, while keeping the descriptors open.
             //

@@ -1,15 +1,40 @@
 # Synthetic experiment, RSMI training, and plotting dependencies.
 # A C++17 compiler such as g++ is also required, but
 # is not installed by pip.
+#
+# Versions float by default, so the artifact keeps installing on new Python
+# releases. The three constraints below are deliberate and each says why; please
+# do not "tidy" them into either a full pin set or a bare list. Nothing here
+# requires numpy < 2.
+
 numpy
-torch
 scipy
-scikit-learn
 matplotlib
 seaborn
 pandas
 tqdm
-zCurve
+
+# Floor, not a pin: root_mean_squared_error (Indexes/RTree/RSMI.py) arrived in
+# scikit-learn 1.4. Earlier releases only have mean_squared_error(squared=False),
+# so an older resolve fails at import.
+scikit-learn>=1.4
+
+# Install these three as a set and never mix versions across them. torchrl and
+# tensordict are released in lockstep with torch and a mismatched trio fails at
+# import, so leaving all three floating lets pip resolve one consistent set --
+# pinning only torch would not. QDTree training (Indexes/QDTree/Train_QdTree.py
+# and QdTree_environment.py) needs all three; they were previously missing from
+# this file altogether, so a fresh environment could not train QD at all.
+torch
+torchrl
+tensordict
+
+# Pinned exactly, unlike everything else here. zCurve.interlace() produces the
+# Z-order codes that *are* the WAZI/ZM point ordering, so a change in its output
+# silently restructures the index instead of failing -- and at 0.0.x the package
+# gives no API or behaviour stability guarantee. Change this pin deliberately and
+# rebuild the affected indexes, never as routine maintenance.
+zCurve==0.0.4
 
 # Optional: plot_results.py uses colorcet when available, and falls back to a
 # seaborn palette otherwise.

@@ -50,6 +50,13 @@ int main(){
     // the outcome depend on the caller's environment.
     setenv("ENABLE_MMAP_BACKEND", "1", 1);
 
+    // Every assertion here is about bytes and about page hit/miss counts, both of
+    // which are computed in software and cannot be moved by what the OS happens
+    // to be caching. So this test is entitled to run where the page cache cannot
+    // be purged; direct_io_test, which asserts on elapsed time, is not and does
+    // not set this.
+    setenv("ALLOW_WARM_PAGE_CACHE", "1", 1);
+
     std::mt19937 rng(90210);
     std::uniform_real_distribution<double_t> d(0.0, 1000.0);
 

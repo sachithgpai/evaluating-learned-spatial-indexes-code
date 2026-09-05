@@ -4,5 +4,10 @@
 # OpenStreetMap PBF files. It includes the synthetic experiment dependencies.
 -r requirements-synthetic.txt
 
+# Both float. A breaking change in either surfaces as an import or parse error
+# rather than as a quietly different dataset, which is why neither is pinned --
+# note though that Datasets/OSM-2d-Parquet.py is written against pyosmium's
+# osmium.SimpleHandler API, so a future major release that retires it needs a
+# code change here rather than a version bump.
 pyarrow
 osmium

@@ -52,6 +52,7 @@ struct DeviceProbeResult{
     size_t samples{0};
     size_t page_bytes{0};
     uint64_t file_bytes{0};
+    bool   page_cache_dropped{false};  // direct probes only; see the drop below
     std::string error;          // empty when the probe succeeded
 };
 
@@ -126,8 +127,15 @@ inline DeviceProbeResult ProbeDeviceLatency(const std::string& dir,
     // meant to reproduce what the buffered backend actually experiences, and
     // there the store was written moments earlier and is still cached -- that
     // residency is the effect being measured, not a contaminant.
-    if(direct)
-        posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    //
+    // Not fatal when it does not happen: the reads below are O_DIRECT and bypass
+    // the cache regardless, so an undropped cache costs the probe RAM rather than
+    // accuracy. Recorded so that a probe taken where the cache cannot be purged
+    // is identifiable afterwards instead of indistinguishable.
+    if(direct){
+        const PageCacheDropStatus drop = DropFileFromPageCache(fd);
+        result.page_cache_dropped = (drop == PageCacheDropStatus::kDropped);
+    }
 
     int read_fd = fd;
     if(direct){

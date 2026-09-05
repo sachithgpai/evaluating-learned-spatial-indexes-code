@@ -13,6 +13,7 @@
  * runtime branch.
  */
 
+#include <fcntl.h>
 #include <vector>
 #include <cstdint>
 #include <cstdlib>
@@ -33,6 +34,54 @@ inline std::string ResolveBlockstoreDir(){
     return (temp_blockstore_dir != nullptr && std::string(temp_blockstore_dir).size() > 0)
                ? NormalizeProjectRoot(std::string(temp_blockstore_dir))
                : PROJECT_ROOT + "temp_blockstore/";
+}
+
+
+/**
+ * Outcome of asking the kernel to drop one file's pages from the OS page cache.
+ *
+ * Telling "refused" apart from "no such mechanism" is the whole point: the
+ * first is a property of this filesystem, the second of this platform, and the
+ * callers react differently to each.
+ */
+enum class PageCacheDropStatus { kDropped, kFailed, kUnsupported };
+
+
+/**
+ * Ask the kernel to evict `fd`'s pages from the OS page cache.
+ *
+ * POSIX_FADV_DONTNEED over (0,0) -- offset zero, length zero meaning "through
+ * to the end" -- is the only portable spelling of this, and in practice Linux
+ * is the only platform that implements it. macOS has no equivalent: F_NOCACHE
+ * sets a policy for *future* I/O on a descriptor and cannot purge what is
+ * already resident, and `purge` is system-wide and privileged. So this reports
+ * kUnsupported there rather than quietly doing nothing, and leaves the caller
+ * to decide whether that invalidates its measurement.
+ *
+ * Advisory even where it does exist -- the kernel may decline, for instance for
+ * pages still awaiting writeback -- which is why the outcome is returned rather
+ * than assumed.
+ */
+inline PageCacheDropStatus DropFileFromPageCache(int fd){
+#ifdef POSIX_FADV_DONTNEED
+    return posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED) == 0
+               ? PageCacheDropStatus::kDropped
+               : PageCacheDropStatus::kFailed;
+#else
+    (void)fd;
+    return PageCacheDropStatus::kUnsupported;
+#endif
+}
+
+
+/** Why a drop did not happen, phrased for the diagnostics the callers emit. */
+inline const char* PageCacheDropReason(PageCacheDropStatus status){
+    switch(status){
+        case PageCacheDropStatus::kDropped:     return "dropped";
+        case PageCacheDropStatus::kFailed:      return "the kernel declined the request";
+        case PageCacheDropStatus::kUnsupported: return "this platform cannot purge a file from the page cache";
+    }
+    return "unknown";
 }
 
 

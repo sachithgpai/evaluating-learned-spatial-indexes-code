@@ -27,6 +27,13 @@ For the synthetic pipeline:
 - Python 3 with `numpy`
 - A C++17 compiler such as `g++`
 - Python packages used by RSMI training: `torch`, `scipy`, `scikit-learn`, `matplotlib`, `seaborn`, and the `zCurve` module imported by `Indexes/RTree/RSMI.py`
+- Python packages used by QDTree training: `torch`, `torchrl` and `tensordict`, imported by `Indexes/QDTree/Train_QdTree.py` and `QdTree_environment.py`. Install the three together — they are released in lockstep and a mismatched set fails at import.
+
+Versions in the requirements files float, so the artifact keeps installing on
+current Python releases. The two exceptions are deliberate and commented in
+place: `scikit-learn>=1.4` (for `root_mean_squared_error`) and an exact
+`zCurve==0.0.4`, whose `interlace()` output *is* the WAZI/ZM point ordering and
+so would silently restructure those indexes if it changed.
 
 Install the Python dependencies with:
 
@@ -93,6 +100,22 @@ bash evaluate_line_n.sh 1
 Evaluation runs write JSONL results under `Experiments/<dataset_name>/ResultsFolder/`.
 Each evaluation task writes `<line_number>.jsonl`, where the line number is its row in `hq_eval_tasks`.
 Memory-mapped temporary blockstore files are created under `temp_blockstore/` and removed by the evaluator.
+
+## Configuration
+
+Experiment sizes, selectivities, block sizes and the storage-backend settings all
+come from `experiment_config.json`; `create_tasklist.sh` reads it and bakes the
+relevant values into each generated task command. The knobs worth knowing about
+when running the evaluator by hand:
+
+- `EXPERIMENT_SEED` (default `42`) — seeds the random searches FLOOD and QD perform. Fixed, so one task is reproducible; vary it deliberately to sample independent search paths.
+- `ENABLE_PAGED_BACKEND` and `BUFFER_POOL_DIRECT_IO` — the binary defaults both off, but the shipped config turns both **on**, so a task list measures the paged backend with direct I/O while a bare `build_evaluate.out` invocation does not.
+- `TEMP_BLOCKSTORE_DIR` — must name node-local storage for direct I/O; Lustre and NFS commonly refuse it.
+- `PROJECT_ROOT` — override instead of rebuilding when the checkout moves.
+
+`Experiments/README.md` documents all of them, with the binary default beside
+each, and `Indexes/utils/tests/README.md` covers the ones specific to the
+storage-backend unit tests.
 
 ## Plotting Results
 

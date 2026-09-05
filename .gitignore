@@ -1,7 +1,18 @@
+.DS_Store
 .vscode/settings.json
 .venv
 Notes
+__pycache__/
+
 # compiled test/tool binaries
 Indexes/utils/tests/*.out
 Experiments/*.out
-__pycache__/
+
+# The tests README builds each test to an extensionless binary named after its
+# source (g++ ... -o $t), so the *.out rule above does not catch them.
+Indexes/utils/tests/*_test
+Indexes/utils/tests/device_latency_probe
+
+# Scratch directory the paged block store writes into; create_tasklist.sh
+# creates it, and PagedDiskBackend unlinks its files as soon as they are written.
+temp_blockstore/

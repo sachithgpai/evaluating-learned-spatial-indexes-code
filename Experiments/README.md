@@ -161,6 +161,60 @@ Set `EXPERIMENT_OUTPUT_DIR` to write evaluator result files outside the default 
 Set `EXPERIMENT_RESULT_FILE` to override the optional `[result_file]` argument.
 `evaluate_line_n.sh` sets `TEMP_BLOCKSTORE_DIR` to `<repo>/temp_blockstore/`.
 
+### Environment variables
+
+Every knob the evaluator reads, with the value it uses when the variable is
+unset. Two columns are needed because the compiled-in default and what a
+generated task actually runs with are not the same thing: `create_tasklist.sh`
+reads `evaluation` out of the config and bakes the storage settings into each
+task command, so the shipped `experiment_config.json` turns the paged backend
+and direct I/O **on** even though the binary defaults them off. Read the
+"binary default" column when running `build_evaluate.out` by hand, and the
+config when running a task list.
+
+**Selecting what runs**
+
+| Variable | Binary default | Effect |
+|---|---|---|
+| `EXPERIMENT_CONFIG` | `../experiment_config.json` | Which config file to read. |
+| `EXPERIMENT_NAME` | the config's `default_experiment` | Which profile under `experiments`. |
+| `PROJECT_ROOT` | compiled-in absolute path | Repository root. Override this rather than rebuilding when the checkout moves. |
+| `EXPERIMENT_OUTPUT_DIR` | `Experiments/<dataset_name>/ResultsFolder/` | Where result JSONL is written. |
+| `EXPERIMENT_RESULT_FILE` | derived unique name | Overrides the optional `[result_file]` argument. |
+| `EXPERIMENT_SEED` | `42` | Seeds the global `rand()` that FLOOD's and QD's random searches draw from. Fixed by default so one task is reproducible; set it per run to draw independent search paths deliberately. Before this was introduced the seed came from `time(NULL)`, which made both indexes silently irreproducible. |
+
+**Storage backend**
+
+| Variable | Binary default | Effect |
+|---|---|---|
+| `ENABLE_PAGED_BACKEND` | `0` (config ships `1`) | Build the paged file at all. Nothing disk-backed is measured without it. |
+| `ENABLE_MMAP_BACKEND` | `0` | Run the mmap pass. No mmap result is timed in the current evaluator; the unit tests switch it on themselves. |
+| `TEMP_BLOCKSTORE_DIR` | `<repo>/temp_blockstore/` | Where scratch files go. Point at node-local disk for direct I/O. |
+| `KEEP_BLOCKSTORE_FILES` | `0` | Skip the immediate `unlink`, so the paged file keeps its name and can be inspected mid-run. |
+| `PAGE_BYTES` | `4096` | Page size. Must be a multiple of 4096 when direct I/O is on. |
+| `RECORD_BYTES` | `16` (`sizeof(Point)`) | Bytes per stored record. |
+
+**Buffer pool**
+
+| Variable | Binary default | Effect |
+|---|---|---|
+| `BUFFER_POOL_FRACTIONS` | the config's `buffer_pool_fractions` | Comma-separated budget sweep, as a fraction of the store's own file size. The sweep runs inside the binary, so this is one variable rather than a task dimension. |
+| `BUFFER_POOL_FLOOR_MODE` | `block` | Lower bound on the frame budget. `block` reserves enough frames for the largest single block; `minimal` does not, which matters for FLOOD and GRID where one skewed cell can otherwise turn a requested 0.001 into an effective 0.4. Either way the result records what actually happened. |
+| `BUFFER_POOL_POLICY` | `LRU` | Eviction policy. `LRU` is the only one implemented; an unknown name is a hard error rather than a silent fallback. |
+| `BUFFER_POOL_DIRECT_IO` | `0` (config ships `1`) | Open the pool's read descriptor `O_DIRECT`, so a miss is a device read rather than a memcpy out of the OS page cache. Needs `PAGE_BYTES` to be a multiple of 4096 and a filesystem that permits direct I/O; `Build()` probes and fails naming the directory if not. |
+| `BUFFER_POOL_MIN_BLOCK_SIZE` | `256` | Skip the disk-backed pass below this block size, recording `disk_backed_skipped` in the result. |
+| `BUFFER_POOL_RELEASE_BLOCKS` | `1` | Free the in-memory copy of the blocks once the paged file exists, so the frame budget is the real memory bound. |
+| `ALLOW_WARM_PAGE_CACHE` | `0` | Proceed where the writer's pages cannot be dropped from the OS page cache (`POSIX_FADV_DONTNEED` is Linux-only). Buffered reads otherwise refuse to build, because a fully resident store makes every pool miss a memcpy and any measured latency wrong rather than merely noisy. Correctness is unaffected — hits and misses are counted in software — so this is right for a functional run and wrong for a timed one. |
+| `DEVICE_LATENCY_PROBE` | on whenever `BUFFER_POOL_DIRECT_IO=1` | Measure per-page read cost once per run and log it with every result row, so a task that landed beside noisy neighbours is identifiable rather than merely suspected. |
+
+**Ablations and diagnostics**
+
+| Variable | Binary default | Effect |
+|---|---|---|
+| `NULL_WORKLOAD` | `0` | Train each index on queries that keep their exact width and height but are moved to uniformly random positions. Box count and selectivity distribution are preserved; only the query-to-data and query-to-query spatial correlation is destroyed, which isolates how much of an index's advantage comes from workload correlation. |
+| `VERIFY_BACKENDS` | `0` | Cross-check that every backend returns identical points, recording `backends_verified` in the result. |
+| `RSMI_DEBUG_FILES` | `0` | Have `Indexes/RTree/RSMI.py` write per-node target/learned scatter plots and class bincounts beside the trained index. Two figures per learned node, so thousands over a full build — a debugging aid, not something to leave on. |
+
 ## Output Locations
 
 - RSMI training writes `.tree` and `.time` files to `Experiments/<dataset_name>/TrainedIndexes/RSMI/`.

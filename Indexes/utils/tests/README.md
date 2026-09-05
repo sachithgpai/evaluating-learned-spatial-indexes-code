@@ -19,6 +19,11 @@ done
 g++ -std=c++17 -O2 device_latency_probe.cpp -o device_latency_probe
 ```
 
+All five build and run on macOS as well as Linux, which is what makes them usable
+as a local inner loop. Two things differ there rather than failing: the page cache
+cannot be purged (see `ALLOW_WARM_PAGE_CACHE` below), and `O_DIRECT` does not
+exist, so `direct_io_test` reports `SKIPPED`.
+
 ## Running
 
 ```bash
@@ -63,11 +68,12 @@ Each prints `PASS` / `FAILED` and exits non-zero on failure.
 
 | Variable | Effect |
 |---|---|
-| `ENABLE_PAGED_BACKEND=1` | Build the paged file at all. Off by default, so a normal experiment run is untouched. |
+| `ENABLE_PAGED_BACKEND=1` | Build the paged file at all. The *binary* defaults it off, but the shipped `experiment_config.json` sets `enable_paged_backend: true` and `create_tasklist.sh` bakes that into every task — so "off by default" describes an unconfigured run, not a generated task list. |
 | `TEMP_BLOCKSTORE_DIR` | Where scratch files are written. Defaults to `$PROJECT_ROOT/temp_blockstore/`. |
 | `KEEP_BLOCKSTORE_FILES=1` | Skip the immediate `unlink`, so the paged file keeps its name and can be inspected while the process runs. |
 | `BUFFER_POOL_DIRECT_IO=1` | Open the pool's read descriptor `O_DIRECT`, so a miss is a device read rather than a memcpy out of the OS page cache. Requires `PAGE_BYTES` to be a multiple of 4096 and a filesystem that permits direct I/O; `Build()` probes and fails with a message naming the directory if not. |
 | `DEVICE_LATENCY_PROBE=1` | Measure per-page read cost once per run and log it with every result row. Defaults to on whenever `BUFFER_POOL_DIRECT_IO=1`. |
+| `ALLOW_WARM_PAGE_CACHE=1` | Proceed when the writer's pages cannot be dropped from the OS page cache. Needed only where no purge mechanism exists (macOS has none — `POSIX_FADV_DONTNEED` is Linux-only). Buffered reads otherwise refuse to build, because a fully resident store turns every pool miss into a memcpy and makes measured latency wrong rather than merely noisy. Hit/miss counts are software-counted and unaffected, so `paged_writer_test` and `paged_backend_test` set this themselves; `direct_io_test` asserts on elapsed time and deliberately does not. |
 
 ## A note on the paged file
 
